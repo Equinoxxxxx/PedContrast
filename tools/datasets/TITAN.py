@@ -24,7 +24,7 @@ from .jaad_data import JAAD
 from ..utils import makedir
 from ..utils import mapping_20, ltrb2xywh, coord2pseudo_heatmap, TITANclip_txt2list, cls_weights
 from ..data._img_mean_std import img_mean_std
-from ..transforms import RandomHorizontalFlip, RandomResizedCrop, crop_local_ctx
+from ..data.transforms import RandomHorizontalFlip, RandomResizedCrop, crop_local_ctx
 from torchvision.transforms import functional as TVF
 
 
@@ -236,11 +236,13 @@ class TITAN_dataset(Dataset):
                  loss_weight='sklearn',
                  tte=None,
                  small_set=0,
-                 use_img=1, img_mode='even_padded', img_size=(224, 224),
-                 use_ctx=1, ctx_mode='local', ctx_size=(224, 224),
-                 use_skeleton=0, sk_mode='pseudo_heatmap',
-                 use_traj=1, traj_mode='ltrb',
-                 use_ego=1,
+                 resize_mode='even_padded', img_size=(224, 224),
+                 modalities='',
+                 img_format='',
+                 ctx_foramt='local', ctx_size=(224, 224),
+                 sklt_format='pseudo_heatmap',
+                 traj_format='ltrb',
+                 ego_format='',
                  augment_mode='none',
                  seg_cls=['person', 'vehicles', 'roads', 'traffic_lights'],
                  pop_occl_track=1,
@@ -264,17 +266,15 @@ class TITAN_dataset(Dataset):
         self._obs_len = self.obs_len * (self.obs_interval + 1)
         self._pred_len = self.pred_len * (self.obs_interval + 1)
 
-        self.use_img = use_img
-        self.img_mode = img_mode
+        self.modalities = modalities
+        self.resize_mode = resize_mode
         self.img_size = img_size
-        self.use_ctx = use_ctx
-        self.ctx_mode = ctx_mode
+        self.img_format = img_format
+        self.ctx_format = ctx_foramt
         self.ctx_size = ctx_size
-        self.use_skeleton = use_skeleton
-        self.sk_mode = sk_mode
-        self.use_traj = use_traj
-        self.traj_mode = traj_mode
-        self.use_ego = use_ego
+        self.sklt_format = sklt_format
+        self.traj_format = traj_format
+        self.ego_format = ego_format
         self.track_save_path = track_save_path
         self.required_labels = required_labels
         self.multi_label_cross = multi_label_cross
@@ -301,12 +301,12 @@ class TITAN_dataset(Dataset):
         self.extra_data_root = '/home/y_feng/workspace6/datasets/TITAN/TITAN_extra'
         self.cropped_img_root = os.path.join(self.extra_data_root,
                                              'cropped_images', 
-                                             self.img_mode, 
+                                             self.resize_mode, 
                                              str(img_size[1])+'w_by_'\
                                                 +str(img_size[0])+'h')
         self.ctx_root = os.path.join(self.extra_data_root, 
                                      'context', 
-                                     self.ctx_mode, 
+                                     self.ctx_format, 
                                      str(ctx_size[1])+'w_by_'\
                                         +str(ctx_size[0])+'h')
         self.ped_ori_local_root = '/home/y_feng/workspace6/datasets/TITAN/TITAN_extra/context/ori_local/224w_by_224h/ped'
@@ -519,7 +519,7 @@ class TITAN_dataset(Dataset):
         img_nm_int = torch.tensor(self.samples['obs']['img_nm_int'][idx])
 
         # squeeze the coords
-        if '0-1' in self.traj_mode:
+        if '0-1' in self.traj_format:
             obs_bbox[:, 0] /= 2704
             obs_bbox[:, 2] /= 2704
             obs_bbox[:, 1] /= 1520
@@ -560,7 +560,7 @@ class TITAN_dataset(Dataset):
                   'ctx_ijhw': torch.tensor([-1, -1, -1, -1]),
                   'sk_ijhw': torch.tensor([-1, -1, -1, -1]),
                   }
-        if self.use_img:
+        if 'img' in self.modalities:
             imgs = []
             for img_nm in self.samples['obs']['img_nm'][idx]:
                 img_path = os.path.join(self.cropped_img_root, 
@@ -588,8 +588,8 @@ class TITAN_dataset(Dataset):
                 ped_imgs = torch.from_numpy(
                     np.ascontiguousarray(ped_imgs.numpy()[::-1, :, :, :]))
             sample['ped_imgs'] = ped_imgs
-        if self.use_ctx:
-            if self.ctx_mode in ('local', 'ori_local', 'mask_ped', 'ori'):
+        if 'ctx' in self.modalities:
+            if self.ctx_format in ('local', 'ori_local', 'mask_ped', 'ori'):
                 ctx_imgs = []
                 for img_nm in self.samples['obs']['img_nm'][idx]:
                     img_path = os.path.join(self.ctx_root, 
@@ -620,8 +620,8 @@ class TITAN_dataset(Dataset):
                         np.ascontiguousarray(ctx_imgs.numpy()[::-1, :, :, :]))
                 sample['obs_context'] = ctx_imgs  # shape [3, obs_len, H, W]
             
-            elif self.ctx_mode == 'seg_ori_local' \
-                or self.ctx_mode == 'seg_local':
+            elif self.ctx_format == 'seg_ori_local' \
+                or self.ctx_format == 'seg_local':
                 # load imgs
                 ctx_imgs = []
                 for img_nm in self.samples['obs']['img_nm'][idx]:
@@ -678,8 +678,8 @@ class TITAN_dataset(Dataset):
                     all_seg * torch.unsqueeze(ctx_imgs, 
                 dim=-1)  # 3Thw n_cls
                 
-        if self.use_skeleton:
-            if self.sk_mode == 'pseudo_heatmap':
+        if 'sklt' in self.modalities:
+            if self.sklt_format == 'pseudo_heatmap':
                 cid = str(int(float(self.samples['obs']['clip_id'][idx][0])))
                 pid = str(int(float(self.samples['obs']['obj_id'][idx][0])))
                 heatmaps = []
@@ -692,7 +692,7 @@ class TITAN_dataset(Dataset):
                 heatmaps = np.stack(heatmaps, axis=0)  # T C H W
                 # T C H W -> C T H W
                 obs_skeletons = torch.from_numpy(heatmaps).float().permute(1, 0, 2, 3)  # shape: (17, seq_len, 48, 48)
-            elif self.sk_mode == 'coord':
+            elif self.sklt_format == 'coord':
                 cid = str(int(float(self.samples['obs']['clip_id'][idx][0])))
                 pid = str(int(float(self.samples['obs']['obj_id'][idx][0])))
                 coords = []
@@ -710,7 +710,7 @@ class TITAN_dataset(Dataset):
                     import pdb;pdb.set_trace()
                     raise NotImplementedError()
             else:
-                raise NotImplementedError(self.sk_mode)
+                raise NotImplementedError(self.sklt_format)
             sample['obs_skeletons'] = obs_skeletons
 
         # augmentation
@@ -726,22 +726,22 @@ class TITAN_dataset(Dataset):
     def _augment(self, sample):
         # flip
         if sample['hflip_flag']:
-            if self.use_img:
+            if 'img' in self.modalities:
                 sample['ped_imgs'] = TVF.hflip(sample['ped_imgs'])
-            if self.use_ctx:
+            if 'ctx' in self.modalities:
                 sample['obs_context'] = TVF.hflip(sample['obs_context'])
-            if self.use_skeleton and ('heatmap' in self.sk_mode):
+            if 'sklt' in self.modalities and ('heatmap' in self.sklt_format):
                 sample['obs_skeletons'] = TVF.hflip(sample['obs_skeletons'])
-            if self.use_traj:
+            if 'traj' in self.modalities:
                 sample['obs_bboxes_unnormed'][:, 0], sample['obs_bboxes_unnormed'][:, 2] = \
                     2704 - sample['obs_bboxes_unnormed'][:, 2], 2704 - sample['obs_bboxes_unnormed'][:, 0]
-                if '0-1' in self.traj_mode:
+                if '0-1' in self.traj_format:
                     sample['obs_bboxes'][:, 0], sample['obs_bboxes'][:, 2] =\
                          1 - sample['obs_bboxes'][:, 2], 1 - sample['obs_bboxes'][:, 0]
                 else:
                     sample['obs_bboxes'][:, 0], sample['obs_bboxes'][:, 2] =\
                          2704 - sample['obs_bboxes'][:, 2], 2704 - sample['obs_bboxes'][:, 0]
-            if self.use_ego:
+            if 'ego' in self.modalities:
                 sample['obs_ego'][:, -1] = -sample['obs_ego'][:, -1]
         # resized crop
         if self.transforms['resized_crop']['img'] is not None:
@@ -764,25 +764,25 @@ class TITAN_dataset(Dataset):
             self.transforms['hflip'].randomize_parameters()
             sample['hflip_flag'] = torch.tensor(self.transforms['hflip'].flag)
             # print('before aug', self.transforms['hflip'].flag, sample['hflip_flag'], self.transforms['hflip'].random_p)
-            if self.use_img:
+            if 'img' in self.modalities:
                 sample['ped_imgs'] = self.transforms['hflip'](sample['ped_imgs'])
             # print('-1', self.transforms['hflip'].flag, sample['hflip_flag'], self.transforms['hflip'].random_p)
-            if self.use_ctx:
-                if self.ctx_mode == 'seg_ori_local' or self.ctx_mode == 'seg_local':
+            if 'ctx' in self.modalities:
+                if self.ctx_format == 'seg_ori_local' or self.ctx_format == 'seg_local':
                     sample['obs_context'] = self.transforms['hflip'](sample['obs_context'].permute(4, 0, 1, 2, 3)).permute(1, 2, 3, 4, 0)
                 sample['obs_context'] = self.transforms['hflip'](sample['obs_context'])
-            if self.use_skeleton and ('heatmap' in self.sk_mode):
+            if 'sklt' in self.modalities and ('heatmap' in self.sklt_format):
                 sample['obs_skeletons'] = self.transforms['hflip'](sample['obs_skeletons'])
-            if self.use_traj and self.transforms['hflip'].flag:
+            if 'traj' in self.modalities and self.transforms['hflip'].flag:
                 sample['obs_bboxes_unnormed'][:, 0], sample['obs_bboxes_unnormed'][:, 2] = \
                     2704 - sample['obs_bboxes_unnormed'][:, 2], 2704 - sample['obs_bboxes_unnormed'][:, 0]
-                if '0-1' in self.traj_mode:
+                if '0-1' in self.traj_format:
                     sample['obs_bboxes'][:, 0], sample['obs_bboxes'][:, 2] =\
                          1 - sample['obs_bboxes'][:, 2], 1 - sample['obs_bboxes'][:, 0]
                 else:
                     sample['obs_bboxes'][:, 0], sample['obs_bboxes'][:, 2] =\
                          2704 - sample['obs_bboxes'][:, 2], 2704 - sample['obs_bboxes'][:, 0]
-            if self.use_ego and self.transforms['hflip'].flag:
+            if 'ego' in self.modalities and self.transforms['hflip'].flag:
                 sample['obs_ego'][:, -1] = -sample['obs_ego'][:, -1]
             
         # resized crop
@@ -828,18 +828,18 @@ class TITAN_dataset(Dataset):
         transforms: torchvision.transforms
         '''
         if 'crop' in self.augment_mode:
-            if self.use_img:
+            if 'img' in self.modalities:
                 self.transforms['resized_crop']['img'] = \
                     RandomResizedCrop(size=self.img_size, # (h, w)
                                     scale=(0.75, 1), 
                                     ratio=(1., 1.))  # w / h
-            if self.use_ctx:
+            if 'ctx' in self.modalities:
                 self.transforms['resized_crop']['ctx'] = \
                     RandomResizedCrop(size=self.ctx_size, # (h, w)
                                       scale=(0.75, 1), 
                                       ratio=(self.ctx_size[1]/self.ctx_size[0], 
                                              self.ctx_size[1]/self.ctx_size[0]))  # w / h
-            if self.use_skeleton and self.sk_mode == 'pseudo_heatmap':
+            if 'sklt' in self.modalities and self.sklt_format == 'pseudo_heatmap':
                 self.transforms['resized_crop']['sk'] = \
                     RandomResizedCrop(size=(48, 48), # (h, w)
                                         scale=(0.75, 1), 

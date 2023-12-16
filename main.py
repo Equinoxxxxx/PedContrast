@@ -35,7 +35,8 @@ def get_args():
     parser.add_argument("--ddp", default=False, type=bool)
     # data
     parser.add_argument('--pre_dataset_names', type=str, default='PIE')
-    parser.add_argument('--dataset_name', type=str, default='TITAN')
+    parser.add_argument('--train_dataset_names', type=str, default='TITAN')
+    parser.add_argument('--test_dataset_names', type=str, default='TITAN')
     parser.add_argument('--small_set', type=float, default=0)
     parser.add_argument('--obs_len', type=int, default=16)
     parser.add_argument('--pred_len', type=int, default=16)
@@ -91,25 +92,23 @@ def get_args():
     parser.add_argument('--n_sampling', type=int, default=3)
 
     # modality
+    parser.add_argument('--modalities', type=str, default='img_sklt_ctx_traj_ego')
     # img settingf
-    parser.add_argument('--use_img', type=int, default=1)
+    parser.add_argument('--img_format', type=str, default='single+seg')
     parser.add_argument('--img_backbone_name', type=str, default='R3D18')
     # sk setting
-    parser.add_argument('--use_skeleton', type=int, default=1)
-    parser.add_argument('--sk_mode', type=str, default='pseudo_heatmap')
-    parser.add_argument('--sk_backbone_name', type=str, default='poseC3D')
+    parser.add_argument('--sklt_format', type=str, default='pseudo_heatmap')
+    parser.add_argument('--sklt_backbone_name', type=str, default='poseC3D')
     # ctx setting
-    parser.add_argument('--use_context', type=int, default=0)
-    parser.add_argument('--ctx_mode', type=str, default='ori_local')
+    parser.add_argument('--ctx_format', type=str, default='ori_local')
     parser.add_argument('--seg_cls', type=str, default='person,vehicles,roads,traffic_lights')
     parser.add_argument('--fuse_mode', type=str, default='transformer')
     parser.add_argument('--ctx_backbone_name', type=str, default='R3D18')
     # traj setting
-    parser.add_argument('--use_traj', type=int, default=1)
-    parser.add_argument('--traj_mode', type=str, default='ltrb')
+    parser.add_argument('--traj_format', type=str, default='ltrb')
     parser.add_argument('--traj_backbone_name', type=str, default='lstm')
     # ego setting
-    parser.add_argument('--use_ego', type=int, default=1)
+    parser.add_argument('--ego_format', type=str, default='accel')
     parser.add_argument('--ego_backbone_name', type=str, default='lstm')
 
     args = parser.parse_args()
@@ -122,8 +121,9 @@ def main(rank, world_size, args):
     local_rank = rank
     ddp = args.ddp and world_size > 1
     # data
-    pre_dataset_names = args.pre_dataset_names
-    dataset_names = args.dataset_names
+    pre_dataset_names = args.pre_dataset_names.split('_')
+    train_dataset_names = args.train_dataset_names.split('_')
+    test_dataset_names = args.test_dataset_names.split('_')
     small_set = args.small_set
     obs_len = args.obs_len
     pred_len = args.pred_len
@@ -180,22 +180,23 @@ def main(rank, world_size, args):
     norm = args.norm
     uncertainty = args.uncertainty
     n_sampling = args.n_sampling
-    
-    use_img = args.use_img
+    # modality
+    modalities = args.modalities.split('_')
+    img_format = args.img_format
     img_backbone_name = args.img_backbone_name
-    use_skeleton = args.use_skeleton
-    sk_mode = args.sk_mode
-    sk_backbone_name = args.sk_backbone_name
-    use_context = args.use_context
-    ctx_mode = args.ctx_mode
+    sklt_format = args.sklt_format
+    sk_backbone_name = args.sklt_backbone_name
+    ctx_format = args.ctx_format
     seg_cls = args.seg_cls
     fuse_mode = args.fuse_mode
     ctx_backbone_name = args.ctx_backbone_name
     use_traj = args.use_traj
-    traj_mode = args.traj_mode
+    traj_format = args.traj_format
     traj_backbone_name = args.traj_backbone_name
     use_ego = args.use_ego
+    ego_format = args.ego_format
     ego_backbone_name = args.ego_backbone_name
+
     
     # conditioned config
     if 'R3D' in img_backbone_name or 'csn' in img_backbone_name\
@@ -211,85 +212,16 @@ def main(rank, world_size, args):
 
 
     # modality settings
-    modalities = []
-    if use_img:
-        modalities.append('img')
-    if use_skeleton:
-        modalities.append('sk')
-    if use_context:
-        modalities.append('ctx')
-    if use_traj:
-        modalities.append('traj')
-    if use_ego:
-        modalities.append('ego')
-
-    img_setting = {
-        'modality': 'img',
-        'mode': resize_mode,
-        'backbone_name': img_backbone_name,
-        'pool': pool + '3d',
-        'n_layer_proj': n_layer_proj,
-        'norm': norm,
-        'proj_dim': proj_dim,
-        'uncertainty': uncertainty
-    }
-
-    sk_setting = {
-        'modality': 'sk',
-        'mode': sk_mode,
-        'backbone_name': sk_backbone_name,
-        'pool': pool + '3d',
-        'n_layer_proj': n_layer_proj,
-        'norm': norm,
-        'proj_dim': proj_dim,
-        'uncertainty': uncertainty
-    }
-
-    ctx_setting = {
-        'modality': 'ctx',
-        'mode': ctx_mode,
-        'seg_cls': seg_cls.split(','),
-        'fuse_mode': fuse_mode,
-        'backbone_name': ctx_backbone_name,
-        'pool': pool + '3d',
-        'n_layer_proj': n_layer_proj,
-        'norm': norm,
-        'proj_dim': proj_dim,
-        'uncertainty': uncertainty
-    }
-
-    traj_setting = {
-        'modality': 'traj',
-        'mode': traj_mode,
-        'backbone_name': traj_backbone_name,
-        'pool': 'none',
-        'n_layer_proj': n_layer_proj,
-        'norm': norm,
-        'proj_dim': proj_dim,
-        'uncertainty': uncertainty
-    }
-
-    ego_setting = {
-        'modality': 'ego',
-        'mode': 'none',
-        'backbone_name': ego_backbone_name,
-        'pool': 'none',
+    m_settings = {m: {
+        'data_format': locals()[m+'_foramt'],
+        'backbone_name': locals()[m+'_backbone_name'],
+        'pool': pool,
         'n_layer_proj': n_layer_proj,
         'norm': norm,
         'proj_dim': proj_dim,
         'uncertainty': uncertainty,
-    }
-    modality_to_setting = {
-        'img': img_setting,
-        'sk': sk_setting,
-        'ctx': ctx_setting,
-        'traj': traj_setting,
-        'ego': ego_setting,
-    }
-    m_settings = {m: modality_to_setting[m] for m in modalities}
-    # mutual setting
-    for m in m_settings:
-        m_settings[m]['n_sampling'] = n_sampling
+        'n_sampling': n_sampling,
+    } for m in modalities}
 
     
     # create dirs
@@ -329,94 +261,60 @@ def main(rank, world_size, args):
             device=torch.device("cuda", local_rank)
     # load the data
     log('----------------------------Load data-----------------------------')
-    pre_datasets = []
-    train_datasets = []
-    if 'TITAN' in pre_dataset_names:
-        titan_pre = TITAN_dataset(sub_set='default_train', norm_traj=False,
-                                      img_norm_mode=img_norm_mode, color_order=color_order,
-                                      obs_len=obs_len, pred_len=pred_len, overlap_ratio=overlap, 
-                                      recog_act=False,
-                                      multi_label_cross=False, 
-                                      use_atomic=False, use_complex=False, use_communicative=False, use_transporting=False, use_age=False,
-                                      loss_weight='sklearn',
-                                      small_set=small_set,
-                                      use_img=use_img, img_mode=resize_mode, 
-                                      use_skeleton=use_skeleton, sk_mode=sk_mode,
-                                      use_ctx=use_context, ctx_mode=ctx_mode,
-                                      use_traj=use_traj, traj_mode=traj_mode,
-                                      use_ego=use_ego,
-                                      augment_mode=augment_mode,
-                                      obs_interval=obs_interval
-                                      )
-    if 'PIE' in pre_dataset_names:
-        pie_pre = PIEDataset(dataset_name='PIE', seq_type='crossing',
+    pre_datasets = {k:None for k in pre_dataset_names}
+    train_datasets = {k:None for k in train_dataset_names}
+    test_datasets = {k:None for k in test_dataset_names}
+    val_datasets = {k:None for k in test_dataset_names}
+    datasets = {
+        'pre': pre_datasets,
+        'train': train_datasets,
+        'val': val_datasets,
+        'test': test_datasets,
+    }
+    for subset in datasets:
+        _subset = subset
+        if subset == 'pre':
+            _subset = 'train'
+        for name in datasets[subset]:
+            if name == 'TITAN':
+                cur_set = TITAN_dataset(sub_set='default_'+_subset, 
+                                        norm_traj=False,
+                                        img_norm_mode=img_norm_mode, color_order=color_order,
+                                        obs_len=obs_len, pred_len=pred_len, overlap_ratio=overlap, 
+                                        recog_act=False,
+                                        multi_label_cross=False, 
+                                        use_atomic=False, 
+                                        use_complex=False, 
+                                        use_communicative=False, 
+                                        use_transporting=False, 
+                                        use_age=False,
+                                        loss_weight='sklearn',
+                                        small_set=small_set,
+                                        resize_mode=resize_mode, 
+                                        modalities=modalities,
+                                        img_format=img_format,
+                                        sklt_format=sklt_format,
+                                        ctx_foramt=ctx_format,
+                                        traj_format=traj_format,
+                                        ego_format=ego_format,
+                                        augment_mode=augment_mode,
+                                        obs_interval=obs_interval
+                                        )
+            if name in ('PIE', 'JAAD'):
+                cur_set = PIEDataset(dataset_name=name, seq_type='crossing',
                                     obs_len=obs_len, 
                                     pred_len=pred_len, 
                                     do_balance=False, 
-                                    subset='train', 
+                                    subset=_subset, 
                                     bbox_size=(224, 224), 
                                     img_norm_mode=img_norm_mode, color_order=color_order,
                                     resize_mode=resize_mode,
-                                    use_img=use_img,
-                                    use_skeleton=use_skeleton, skeleton_mode=sk_mode,
-                                    use_context=use_context, ctx_mode=ctx_mode,
-                                    use_traj=use_traj, traj_mode=traj_mode,
-                                    use_ego=use_ego,
-                                    small_set=small_set,
-                                    overlap_retio=overlap,
-                                    tte=None,
-                                    recog_act=False,
-                                    normalize_pos=False,
-                                    obs_interval=(obs_interval+1)*3-1,
-                                    augment_mode=augment_mode)
-    if 'JAAD' in pre_dataset_names:
-        jaad_pre = PIEDataset(dataset_name='JAAD', seq_type='crossing',
-                                    obs_len=obs_len, pred_len=pred_len, do_balance=False, subset='train', bbox_size=(224, 224), 
-                                    img_norm_mode=img_norm_mode, color_order=color_order,
-                                    resize_mode=resize_mode,
-                                    use_img=use_img,
-                                    use_skeleton=use_skeleton, skeleton_mode=sk_mode,
-                                    use_context=use_context, ctx_mode=ctx_mode,
-                                    use_traj=use_traj, traj_mode=traj_mode,
-                                    use_ego=use_ego,
-                                    small_set=small_set,
-                                    overlap_retio=overlap,
-                                    tte=None,
-                                    recog_act=False,
-                                    normalize_pos=False,
-                                    obs_interval=(obs_interval+1)*3-1,
-                                    augment_mode=augment_mode)
-    if 'TITAN' in dataset_names:
-        titan_train = TITAN_dataset(sub_set='default_train', norm_traj=False,
-                                      img_norm_mode=img_norm_mode, color_order=color_order,
-                                      obs_len=obs_len, pred_len=pred_len, overlap_ratio=overlap, 
-                                      recog_act=False,
-                                      multi_label_cross=False, 
-                                      use_atomic=False, use_complex=False, use_communicative=False, use_transporting=False, use_age=False,
-                                      loss_weight='sklearn',
-                                      small_set=small_set,
-                                      use_img=use_img, img_mode=resize_mode, 
-                                      use_skeleton=use_skeleton, sk_mode=sk_mode,
-                                      use_ctx=use_context, ctx_mode=ctx_mode,
-                                      use_traj=use_traj, traj_mode=traj_mode,
-                                      use_ego=use_ego,
-                                      augment_mode=augment_mode,
-                                      obs_interval=obs_interval
-                                      )
-    if 'PIE' in dataset_names:
-        pie_train = PIEDataset(dataset_name='PIE', seq_type='crossing',
-                                    obs_len=obs_len, 
-                                    pred_len=pred_len, 
-                                    do_balance=False, 
-                                    subset='train', 
-                                    bbox_size=(224, 224), 
-                                    img_norm_mode=img_norm_mode, color_order=color_order,
-                                    resize_mode=resize_mode,
-                                    use_img=use_img,
-                                    use_skeleton=use_skeleton, skeleton_mode=sk_mode,
-                                    use_context=use_context, ctx_mode=ctx_mode,
-                                    use_traj=use_traj, traj_mode=traj_mode,
-                                    use_ego=use_ego,
+                                    modalities=modalities,
+                                    img_format=img_format,
+                                    sklt_format=sklt_format,
+                                    ctx_format=ctx_format,
+                                    traj_format=traj_format,
+                                    ego_format=ego_format,
                                     small_set=small_set,
                                     overlap_retio=overlap,
                                     tte=tte,
@@ -424,137 +322,18 @@ def main(rank, world_size, args):
                                     normalize_pos=False,
                                     obs_interval=(obs_interval+1)*3-1,
                                     augment_mode=augment_mode)
-    if 'JAAD' in dataset_names:
-        jaad_train = PIEDataset(dataset_name='JAAD', seq_type='crossing',
-                                    obs_len=obs_len, pred_len=pred_len, do_balance=False, subset='train', bbox_size=(224, 224), 
-                                    img_norm_mode=img_norm_mode, color_order=color_order,
-                                    resize_mode=resize_mode,
-                                    use_img=use_img,
-                                    use_skeleton=use_skeleton, skeleton_mode=sk_mode,
-                                    use_context=use_context, ctx_mode=ctx_mode,
-                                    use_traj=use_traj, traj_mode=traj_mode,
-                                    use_ego=use_ego,
-                                    small_set=small_set,
-                                    overlap_retio=overlap,
-                                    tte=tte,
-                                    recog_act=False,
-                                    normalize_pos=False,
-                                    obs_interval=(obs_interval+1)*3-1,
-                                    augment_mode=augment_mode)
-    titan_val = TITAN_dataset(sub_set='default_val', norm_traj=False,
-                                img_norm_mode=img_norm_mode, color_order=color_order,
-                                obs_len=obs_len, pred_len=pred_len, overlap_ratio=overlap, 
-                                recog_act=False,
-                                multi_label_cross=False, 
-                                use_atomic=False, use_complex=False, use_communicative=False, use_transporting=False, use_age=False,
-                                loss_weight='sklearn',
-                                small_set=small_set,
-                                use_img=use_img, img_mode=resize_mode, 
-                                use_skeleton=use_skeleton, sk_mode=sk_mode,
-                                use_ctx=use_context, ctx_mode=ctx_mode,
-                                use_traj=use_traj, traj_mode=traj_mode,
-                                use_ego=use_ego,
-                                augment_mode=augment_mode,
-                                obs_interval=obs_interval
-                                )
-    pie_val = PIEDataset(dataset_name='PIE', 
-                            seq_type='crossing',
-                            obs_len=obs_len, 
-                            pred_len=pred_len, 
-                            do_balance=False, 
-                            subset='val', 
-                            bbox_size=(224, 224), 
-                            img_norm_mode=img_norm_mode, color_order=color_order,
-                            resize_mode=resize_mode,
-                            use_img=use_img,
-                            use_skeleton=use_skeleton, skeleton_mode=sk_mode,
-                            use_context=use_context, ctx_mode=ctx_mode,
-                            use_traj=use_traj, traj_mode=traj_mode,
-                            use_ego=use_ego,
-                            small_set=small_set,
-                            overlap_retio=overlap,
-                            tte=test_tte,
-                            recog_act=False,
-                            normalize_pos=False,
-                            obs_interval=(obs_interval+1)*3-1,
-                            augment_mode=augment_mode)
-    jaad_val = PIEDataset(dataset_name='JAAD', 
-                            seq_type='crossing',
-                            obs_len=obs_len, 
-                            pred_len=pred_len, 
-                            do_balance=False, 
-                            subset='val', 
-                            bbox_size=(224, 224), 
-                            img_norm_mode=img_norm_mode, color_order=color_order,
-                            resize_mode=resize_mode,
-                            use_img=use_img,
-                            use_skeleton=use_skeleton, skeleton_mode=sk_mode,
-                            use_context=use_context, ctx_mode=ctx_mode,
-                            use_traj=use_traj, traj_mode=traj_mode,
-                            use_ego=use_ego,
-                            small_set=small_set,
-                            overlap_retio=overlap,
-                            tte=test_tte,
-                            recog_act=False,
-                            normalize_pos=False,
-                            obs_interval=(obs_interval+1)*3-1,
-                            augment_mode=augment_mode)
-    titan_test = TITAN_dataset(sub_set='default_test', 
-                               norm_traj=False,
-                                      img_norm_mode=img_norm_mode, 
-                                      color_order=color_order,
-                                      obs_len=obs_len, 
-                                      pred_len=pred_len, 
-                                      overlap_ratio=overlap, 
-                                      recog_act=False,
-                                      multi_label_cross=False, 
-                                      use_atomic=False, 
-                                      use_complex=False, 
-                                      use_communicative=False, 
-                                      use_transporting=False, 
-                                      use_age=False,
-                                      loss_weight='sklearn',
-                                      small_set=small_set,
-                                      use_img=use_img, img_mode=resize_mode, 
-                                      use_skeleton=use_skeleton, sk_mode=sk_mode,
-                                      use_ctx=use_context, ctx_mode=ctx_mode,
-                                      use_traj=use_traj, traj_mode=traj_mode,
-                                      use_ego=use_ego,
-                                      augment_mode=augment_mode,
-                                      obs_interval=obs_interval
-                                      )
-    pie_test = PIEDataset(dataset_name='PIE', seq_type='crossing',
-                                    obs_len=obs_len, pred_len=pred_len, do_balance=False, subset='test', bbox_size=(224, 224), 
-                                    img_norm_mode=img_norm_mode, color_order=color_order,
-                                    resize_mode=resize_mode,
-                                    use_img=use_img,
-                                    use_skeleton=use_skeleton, skeleton_mode=sk_mode,
-                                    use_context=use_context, ctx_mode=ctx_mode,
-                                    use_traj=use_traj, traj_mode=traj_mode,
-                                    use_ego=use_ego,
-                                    small_set=small_set,
-                                    overlap_retio=overlap,
-                                    tte=test_tte,
-                                    recog_act=False,
-                                    normalize_pos=False,
-                                    obs_interval=(obs_interval+1)*3-1,
-                                    augment_mode=augment_mode)
-    jaad_test = PIEDataset(dataset_name='JAAD', seq_type='crossing',
-                                    obs_len=obs_len, pred_len=pred_len, do_balance=False, subset='test', bbox_size=(224, 224), 
-                                    img_norm_mode=img_norm_mode, color_order=color_order,
-                                    resize_mode=resize_mode,
-                                    use_img=use_img,
-                                    use_skeleton=use_skeleton, skeleton_mode=sk_mode,
-                                    use_context=use_context, ctx_mode=ctx_mode,
-                                    use_traj=use_traj, traj_mode=traj_mode,
-                                    use_ego=use_ego,
-                                    small_set=small_set,
-                                    overlap_retio=overlap,
-                                    tte=test_tte,
-                                    recog_act=False,
-                                    normalize_pos=False,
-                                    obs_interval=(obs_interval+1)*3-1,
-                                    augment_mode=augment_mode)
+                if subset in ('test', 'val'):
+                    cur_set.tte = test_tte
+            if name == 'nuscenes':
+                pass
+                
+
+
+
+
+
+
+
     val_datasets = [titan_val, pie_val, jaad_val]
     test_datasets = [titan_test, pie_test, jaad_test]
     if 'TITAN' in pre_dataset_names:
@@ -563,11 +342,11 @@ def main(rank, world_size, args):
         pre_datasets.append(pie_pre)
     if 'JAAD' in pre_dataset_names:
         pre_datasets.append(jaad_pre)
-    if 'TITAN' in dataset_names:
+    if 'TITAN' in train_dataset_names:
         train_datasets.append(titan_train)
-    if 'PIE' in dataset_names:
+    if 'PIE' in train_dataset_names:
         train_datasets.append(pie_train)
-    if 'JAAD' in dataset_names:
+    if 'JAAD' in train_dataset_names:
         train_datasets.append(jaad_train)
     pre_loaders = []
     train_loaders = []
@@ -663,7 +442,7 @@ def main(rank, world_size, args):
     for n, p in model.named_parameters():
         if 'backbone' in n and ('ctx' in n or 'img' in n):
             backbone_paras += [p]
-        elif sk_mode == 'pseudo_heatmap' and ('backbone' in n) and ('sk_model' in n):
+        elif sklt_format == 'pseudo_heatmap' and ('backbone' in n) and ('sk_model' in n):
             backbone_paras += [p]
         else:
             other_paras += [p]
@@ -816,7 +595,7 @@ def main(rank, world_size, args):
                 for k in curve_dict[cur_dataset]['test']:
                     curve_dict[cur_dataset]['test'][k].append(test_res['final'][k])
                     val_lists = [curve_dict[cur_dataset]['test'][k]]
-                    if cur_dataset in dataset_names:
+                    if cur_dataset in train_dataset_names:
                         val_lists = [curve_dict[cur_dataset]['train'][k],curve_dict[cur_dataset]['test'][k]]
                     draw_curves2(path=os.path.join(train_test_plot_dir, cur_dataset+k+'.png'), 
                                 val_lists=val_lists,

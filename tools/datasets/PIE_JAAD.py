@@ -19,8 +19,8 @@ import pdb
 from .pie_data import PIE
 from .jaad_data import JAAD
 from ..utils import mapping_20, makedir, ltrb2xywh, coord2pseudo_heatmap, cls_weights
-from ..transforms import RandomHorizontalFlip, RandomResizedCrop, crop_local_ctx
-from ..data._img_mean_std import img_mean_std
+from ..data.transforms import RandomHorizontalFlip, RandomResizedCrop, crop_local_ctx
+from ..data.normalize import img_mean_std, norm_imgs
 from ..general import HiddenPrints
 
 
@@ -32,18 +32,17 @@ class PIEDataset(Dataset):
                  data_split_type='default',
                  seq_type='crossing', 
                  obs_len=16, pred_len=1, overlap_retio=0.5,
-                 do_balance=True, balance_label='target', 
+                 do_balance=True,
                  subset='train', 
                  bbox_size=(224, 224), ctx_size=(224, 224), 
                  color_order='BGR', crop_from_ori=False, load_all_img=False, 
-                 resize_mode='padded', min_wh=None, max_occ=2, 
-                 use_skeleton=0, skeleton_mode='coord', 
-                 use_img=0, 
-                 use_context=0, ctx_mode='mask_ped', 
-                 seg_cls_idx=[24, 26, 19, 20],
-                 use_traj=0, traj_mode='ltrb', 
-                 use_ego=0,
-                 use_single_img=False,
+                 resize_mode='even_padded', min_wh=None, max_occ=2, 
+                 modalities='',
+                 img_format='',
+                 sklt_format='coord', 
+                 ctx_format='mask_ped', 
+                 traj_format='ltrb', 
+                 ego_format='accel',
                  pred_img=0,
                  pred_context=0, pred_context_mode='ori',
                  small_set=0, seg_class_set=1,
@@ -65,8 +64,6 @@ class PIEDataset(Dataset):
         self.img_norm_mode = img_norm_mode
         self.color_order = color_order
         self.img_mean, self.img_std = img_mean_std(self.img_norm_mode)  # BGR
-        # self.img_mean = [0.406, 0.456, 0.485]  # BGR
-        # self.img_std = [0.225, 0.224, 0.229]
         self.obs_len = obs_len
         self.pred_len = pred_len
         self.overlap_ratio = overlap_retio
@@ -80,24 +77,17 @@ class PIEDataset(Dataset):
         self.crop_from_ori = crop_from_ori
         self.load_all_img = load_all_img
         self.resize_mode = resize_mode
-        self.use_skeleton = use_skeleton
-        self.skeleton_mode = skeleton_mode
-        self.use_img = use_img
-        self.use_context = use_context
-        self.ctx_mode = ctx_mode
+        self.modalities = modalities
+        self.img_format = img_format
+        self.sklt_format = sklt_format
+        self.ctx_format = ctx_format
         self.ctx_size = ctx_size
-        self._seg_class_idx = seg_cls_idx # person, car, light, sign
-        self.seg_class_idx = [11, 13, 6, 7]  # person, car, light, sign
-        self.seg_class_idx = []
-        for i in self._seg_class_idx:
-            self.seg_class_idx.append(mapping_20[i] - 1)
-        self.use_single_img = use_single_img
+        self.traj_format = traj_format
+        self.ego_format = ego_format
+        # self.seg_class_idx = [11, 13, 6, 7]  # person, car, light, sign
         self.pred_img = pred_img
         self.pred_context = pred_context
         self.pred_context_mode = pred_context_mode
-        self.use_traj = use_traj
-        self.traj_mode = traj_mode
-        self.use_ego = use_ego
         self.augment_mode = augment_mode
         self.seg_cls = seg_cls
         self.ego_accel = ego_accel
@@ -169,7 +159,6 @@ class PIEDataset(Dataset):
                                                 'imgnm_to_objid_to_ann.pkl')
         
         if self.tte is not None:
-
             self.data_opts['min_track_size'] += self.tte[1]
 
         self.cropped_path = os.path.join(self.root_path, 
@@ -192,7 +181,7 @@ class PIEDataset(Dataset):
         
         # convert speed unit
         if self.speed_unit == 'm/s':
-            if self.dataset_name == 'JAAD' and self.use_ego:
+            if self.dataset_name == 'JAAD' and 'ego' in self.modalities:
                 raise ValueError('Cannot turn ego motion in JAAD into m/s.')
             elif self.dataset_name == 'PIE':
                 self.p_tracks['obd_speed'] = \
@@ -253,15 +242,15 @@ class PIEDataset(Dataset):
             print('num samples after balance:', self.num_samples)
         
         # add seg maps in samples
-        if self.use_context:
+        if 'ctx' in self.modalities:
             self.ctx_path = os.path.join(self.root_path, 
                                          'context', 
-                                         self.ctx_mode, 
+                                         self.ctx_format, 
                                          str(ctx_size[0])+'w_by_'\
                                             +str(ctx_size[1])+'h')
-            if self.ctx_mode == 'seg_multi' \
-                or self.ctx_mode == 'seg_single' \
-                    or self.ctx_mode == 'local_seg_multi':
+            if self.ctx_format == 'seg_multi' \
+                or self.ctx_format == 'seg_single' \
+                    or self.ctx_format == 'local_seg_multi':
                 self.ctx_path = os.path.join(self.root_path, 'seg')
                 seg_paths = []
                 for s in range(self.num_samples):
@@ -315,8 +304,8 @@ class PIEDataset(Dataset):
                                    dim=-1)
         # obs_ego = torch.cat([obs_ego, torch.zeros(obs_ego.size())], dim=-1)
 
-        # squeeze the coords
-        if '0-1' in self.traj_mode:
+        # normalize the coordinates
+        if '0-1' in self.traj_format:
             obs_bboxes[:, 0] /= 1920
             obs_bboxes[:, 2] /= 1920
             obs_bboxes[:, 1] /= 1080
@@ -338,8 +327,8 @@ class PIEDataset(Dataset):
         if self.dataset_name == 'PIE':
             sample['set_id_int'] = self.samples['obs_set_id_int'][idx]
 
-        if self.use_skeleton:
-            if self.skeleton_mode == 'coord':
+        if 'sk' in self.modalities:
+            if self.sklt_format == 'coord':
                 pid = self.samples['obs_pid'][idx][0][0]
                 coords = []
                 ori_obs_img_paths = self.samples['obs_image_paths'][idx]
@@ -358,7 +347,7 @@ class PIEDataset(Dataset):
                     print('coords shape',coords.shape)
                     import pdb;pdb.set_trace()
                     raise NotImplementedError()
-            elif self.skeleton_mode == 'heatmap':
+            elif self.sklt_format == 'heatmap':
                 pid = self.samples['obs_pid'][idx][0][0]
                 heatmaps = []
                 ori_obs_img_paths = self.samples['obs_image_paths'][idx]
@@ -372,7 +361,7 @@ class PIEDataset(Dataset):
                 heatmaps = np.stack(heatmaps, axis=0)  # T C H W
                 # T C H W -> C T H W
                 obs_skeletons = torch.from_numpy(heatmaps).float().permute(1, 0, 2, 3)  # shape: (17, seq_len, 96, 72)
-            elif self.skeleton_mode == 'pseudo_heatmap':
+            elif self.sklt_format == 'pseudo_heatmap':
                 pid = self.samples['obs_pid'][idx][0][0]
                 heatmaps = []
                 ori_obs_img_paths = self.samples['obs_image_paths'][idx]
@@ -386,7 +375,7 @@ class PIEDataset(Dataset):
                 heatmaps = np.stack(heatmaps, axis=0)  # T C H W
                 # T C H W -> C T H W
                 obs_skeletons = torch.from_numpy(heatmaps).float().permute(1, 0, 2, 3)  # shape: (17, seq_len, 48, 48)
-            elif self.skeleton_mode == 'img+heatmap':
+            elif self.sklt_format == 'img+heatmap':
                 if not self.crop_from_ori:
                     pid = self.samples['obs_pid'][idx][0][0]
                     imgs = []
@@ -406,16 +395,11 @@ class PIEDataset(Dataset):
                 ped_imgs = torch.from_numpy(imgs).float().permute(3, 0, 1, 2)
                 # normalize img
                 if self.img_norm_mode != 'ori':
-                    ped_imgs /= 255.
-                    ped_imgs[0, :, :, :] -= self.img_mean[0]
-                    ped_imgs[1, :, :, :] -= self.img_mean[1]
-                    ped_imgs[2, :, :, :] -= self.img_mean[2]
-                    ped_imgs[0, :, :, :] /= self.img_std[0]
-                    ped_imgs[1, :, :, :] /= self.img_std[1]
-                    ped_imgs[2, :, :, :] /= self.img_std[2]
+                    ped_imgs = norm_imgs(ped_imgs, self.img_mean, self.img_std)
                 # BGR -> RGB
                 if self.color_order == 'RGB':
-                    ped_imgs = torch.from_numpy(np.ascontiguousarray(ped_imgs.numpy()[::-1, :, :, :]))  # 3 T H W
+                    # ped_imgs = torch.from_numpy(np.ascontiguousarray(ped_imgs.numpy()[::-1, :, :, :]))  # 3 T H W
+                    ped_imgs = torch.flip(ped_imgs, dims=[0])
                 # load heatmaps
                 pid = self.samples['obs_pid'][idx][0][0]
                 heatmaps = []
@@ -440,12 +424,18 @@ class PIEDataset(Dataset):
                 obs_skeletons = heatmaps * ped_imgs
 
             else:
-                raise NotImplementedError(self.skeleton_mode)
+                raise NotImplementedError(self.sklt_format)
             sample['obs_skeletons'] = obs_skeletons
         
-        if self.use_img or self.use_single_img:
+        if 'img' in self.modalities:
             # print('-----------getting img-----------')
-            if not self.crop_from_ori:
+            if self.crop_from_ori:
+                obs_img_paths = self.samples['obs_image_paths'][idx]
+                obs_bboxes = self.samples['obs_bbox'][idx]
+                imgs = []
+                for path, bbox in zip(obs_img_paths, obs_bboxes):
+                    imgs.append(self.load_cropped_image(path, bbox))
+            else:
                 pid = self.samples['obs_pid'][idx][0][0]
                 imgs = []
                 ori_obs_img_paths = self.samples['obs_image_paths'][idx]
@@ -453,14 +443,9 @@ class PIEDataset(Dataset):
                     img_nm = path.split('/')[-1]
                     img_path = os.path.join(self.cropped_path, pid, img_nm)
                     imgs.append(cv2.imread(img_path))
-            else:
-                obs_img_paths = self.samples['obs_image_paths'][idx]
-                obs_bboxes = self.samples['obs_bbox'][idx]
-                imgs = []
-                for path, bbox in zip(obs_img_paths, obs_bboxes):
-                    imgs.append(self.load_cropped_image(path, bbox))
-            # (T, H, W, C) -> (C, T, H, W)
+            # temporal stack
             imgs = np.stack(imgs, axis=0)
+            # (T, H, W, C) -> (C, T, H, W)
             try:
                 ped_imgs = torch.from_numpy(imgs).float().permute(3, 0, 1, 2)
             except:
@@ -468,24 +453,16 @@ class PIEDataset(Dataset):
 
             # normalize img
             if self.img_norm_mode != 'ori':
-                ped_imgs /= 255.
-                ped_imgs[0, :, :, :] -= self.img_mean[0]
-                ped_imgs[1, :, :, :] -= self.img_mean[1]
-                ped_imgs[2, :, :, :] -= self.img_mean[2]
-                ped_imgs[0, :, :, :] /= self.img_std[0]
-                ped_imgs[1, :, :, :] /= self.img_std[1]
-                ped_imgs[2, :, :, :] /= self.img_std[2]
+                ped_imgs = norm_imgs(ped_imgs, self.img_mean, self.img_std)
             # BGR -> RGB
             if self.color_order == 'RGB':
-                ped_imgs = torch.from_numpy(np.ascontiguousarray(ped_imgs.numpy()[::-1, :, :, :]))
-            if self.use_img:
-                sample['ped_imgs'] = ped_imgs  # shape [3, obs_len, H, W]
-            if self.use_single_img:
-                sample['ped_single_imgs'] = ped_imgs[:, -1]
+                # ped_imgs = torch.from_numpy(np.ascontiguousarray(ped_imgs.numpy()[::-1, :, :, :]))
+                ped_imgs = torch.flip(ped_imgs, dims=[0])
+            sample['ped_imgs'] = ped_imgs  # shape [3, obs_len, H, W]
         
-        if self.use_context:
+        if 'ctx' in self.modalities:
             # print('-----------getting ctx-----------')
-            if self.ctx_mode == 'mask_ped' or self.ctx_mode == 'local' or self.ctx_mode == 'ori_local' or self.ctx_mode == 'ori':
+            if self.ctx_format == 'mask_ped' or self.ctx_format == 'local' or self.ctx_format == 'ori_local' or self.ctx_format == 'ori':
                 pid = self.samples['obs_pid'][idx][0][0]
                 ctx_imgs = []
                 ori_obs_img_paths = self.samples['obs_image_paths'][idx]
@@ -497,18 +474,12 @@ class PIEDataset(Dataset):
                 ctx_imgs = torch.from_numpy(ctx_imgs).float().permute(3, 0, 1, 2)
                 # normalize img
                 if self.img_norm_mode != 'ori':
-                    ctx_imgs /= 255.
-                    ctx_imgs[0, :, :, :] -= self.img_mean[0]
-                    ctx_imgs[1, :, :, :] -= self.img_mean[1]
-                    ctx_imgs[2, :, :, :] -= self.img_mean[2]
-                    ctx_imgs[0, :, :, :] /= self.img_std[0]
-                    ctx_imgs[1, :, :, :] /= self.img_std[1]
-                    ctx_imgs[2, :, :, :] /= self.img_std[2]
+                    ctx_imgs = norm_imgs(ctx_imgs, self.img_mean, self.img_std)
                 # BGR -> RGB
                 if self.color_order == 'RGB':
                     ctx_imgs = torch.from_numpy(np.ascontiguousarray(ctx_imgs.numpy()[::-1, :, :, :]))
                 sample['obs_context'] = ctx_imgs  # shape [3, obs_len, H, W]
-            elif self.ctx_mode == 'seg_ori_local' or self.ctx_mode == 'seg_local':
+            elif self.ctx_format == 'seg_ori_local' or self.ctx_format == 'seg_local':
                 # load imgs
                 ori_obs_img_paths = self.samples['obs_image_paths'][idx]
                 ctx_imgs = []
@@ -520,13 +491,7 @@ class PIEDataset(Dataset):
                 ctx_imgs = torch.from_numpy(ctx_imgs).float().permute(3, 0, 1, 2)  # CTHW
                 # norm imgs
                 if self.img_norm_mode != 'ori':
-                    ctx_imgs /= 255.
-                    ctx_imgs[0, :, :, :] -= self.img_mean[0]
-                    ctx_imgs[1, :, :, :] -= self.img_mean[1]
-                    ctx_imgs[2, :, :, :] -= self.img_mean[2]
-                    ctx_imgs[0, :, :, :] /= self.img_std[0]
-                    ctx_imgs[1, :, :, :] /= self.img_std[1]
-                    ctx_imgs[2, :, :, :] /= self.img_std[2]
+                    ctx_imgs = norm_imgs(ctx_imgs, self.img_mean, self.img_std)
                 # BGR -> RGB
                 if self.color_order == 'RGB':
                     ctx_imgs = torch.from_numpy(np.ascontiguousarray(ctx_imgs.numpy()[::-1, :, :, :]))  # CTHW
@@ -567,7 +532,7 @@ class PIEDataset(Dataset):
                     all_seg.append(torch.stack(crop_segs[c], dim=1))  # 1Thw
                 all_seg = torch.stack(all_seg, dim=4)  # 1Thw n_cls
                 sample['obs_context'] = all_seg * torch.unsqueeze(crop_imgs, dim=-1)  # 3Thw n_cls
-                
+
         if self.pred_img:
             pass
         
@@ -584,13 +549,7 @@ class PIEDataset(Dataset):
                 ctx_imgs = torch.from_numpy(ctx_imgs).float().permute(3, 0, 1, 2)
                 # normalize img
                 if self.img_norm_mode != 'ori':
-                    ctx_imgs /= 255.
-                    ctx_imgs[0, :, :, :] -= self.img_mean[0]
-                    ctx_imgs[1, :, :, :] -= self.img_mean[1]
-                    ctx_imgs[2, :, :, :] -= self.img_mean[2]
-                    ctx_imgs[0, :, :, :] /= self.img_std[0]
-                    ctx_imgs[1, :, :, :] /= self.img_std[1]
-                    ctx_imgs[2, :, :, :] /= self.img_std[2]
+                    ctx_imgs = norm_imgs(ctx_imgs, self.img_mean, self.img_std)
                 # BGR -> RGB
                 if self.color_order == 'RGB':
                     ctx_imgs = torch.from_numpy(np.ascontiguousarray(ctx_imgs.numpy()[::-1, :, :, :]))
@@ -609,16 +568,16 @@ class PIEDataset(Dataset):
     def _augment(self, sample):
         # flip
         if sample['hflip_flag']:
-            if self.use_img:
+            if 'img' in self.modalities:
                 sample['ped_imgs'] = TVF.hflip(sample['ped_imgs'])
-            if self.use_context:
+            if 'ctx' in self.modalities:
                 sample['obs_context'] = TVF.hflip(sample['obs_context'])
-            if self.use_skeleton and ('heatmap' in self.sk_mode):
+            if 'sk' in self.modalities and ('heatmap' in self.sk_mode):
                 sample['obs_skeletons'] = TVF.hflip(sample['obs_skeletons'])
-            if self.use_traj:
+            if 'traj' in self.modalities:
                 sample['obs_bboxes_unnormed'][:, 0], sample['obs_bboxes_unnormed'][:, 2] = \
                     2704 - sample['obs_bboxes_unnormed'][:, 2], 2704 - sample['obs_bboxes_unnormed'][:, 0]
-                if '0-1' in self.traj_mode:
+                if '0-1' in self.traj_format:
                     sample['obs_bboxes'][:, 0], sample['obs_bboxes'][:, 2] =\
                          1 - sample['obs_bboxes'][:, 2], 1 - sample['obs_bboxes'][:, 0]
                 else:
@@ -643,16 +602,16 @@ class PIEDataset(Dataset):
         # flip
         if self.transforms['hflip'] is not None:
             sample['hflip_flag'] = torch.tensor(self.transforms['hflip'].flag)
-            if self.use_img:
+            if 'img' in self.modalities:
                 sample['ped_imgs'] = self.transforms['hflip'](sample['ped_imgs'])
-            if self.use_context:
+            if 'ctx' in self.modalities:
                 sample['obs_context'] = self.transforms['hflip'](sample['obs_context'])
-            if self.use_skeleton and ('heatmap' in self.skeleton_mode):
+            if 'sk' in self.modalities and ('heatmap' in self.sklt_format):
                 sample['obs_skeletons'] = self.transforms['hflip'](sample['obs_skeletons'])
-            if self.use_traj and self.transforms['hflip'].flag:
+            if 'traj' in self.modalities and self.transforms['hflip'].flag:
                 sample['obs_bboxes_unnormed'][:, 0], sample['obs_bboxes_unnormed'][:, 2] = \
                     1920 - sample['obs_bboxes_unnormed'][:, 2], 1920 - sample['obs_bboxes_unnormed'][:, 0]
-                if '0-1' in self.traj_mode:
+                if '0-1' in self.traj_format:
                     sample['obs_bboxes'][:, 0], sample['obs_bboxes'][:, 2] =\
                          1 - sample['obs_bboxes'][:, 2], 1 - sample['obs_bboxes'][:, 0]
                 else:
@@ -849,7 +808,7 @@ class PIEDataset(Dataset):
             for i in range(len(normed_samples['center'])):
                 normed_samples['center'][i] = np.subtract(normed_samples['center'][i][:],
                                                             normed_samples['center'][i][0]).tolist()
-        if self.traj_mode == 'xywh':
+        if self.traj_format == 'xywh':
             for i in range(len(normed_samples['bbox'])):
                 normed_samples['bbox'][i] = ltrb2xywh(normed_samples['bbox'][i])
 
@@ -955,11 +914,7 @@ class PIEDataset(Dataset):
                 # 'pred_intent': pred_slices['intention_binary'],
                 'pred_pid': pred_slices['ped_id'],
                 'pred_occ': pred_slices['occlusion']}
-        # if self.use_skeleton and self.skeleton_mode == 'coord':
-        #     all_samples['obs_skeletons'] = np.array(obs_slices['skeletons'])
-        #     all_samples['pred_skeletons'] = np.array(pred_slices['skeletons'])
-        #     import pdb;pdb.set_trace()
-        #     assert all_samples['obs_skeletons'].shape[0] == all_samples['obs_img_nm_int'].shape[0], (all_samples['obs_skeletons'].shape, all_samples['obs_img_nm_int'].shape)
+
         if self.seq_type == 'crossing':
             all_samples['target'] = pred_slices['activities']
             if self.recog_act:
@@ -975,17 +930,17 @@ class PIEDataset(Dataset):
         transforms: torchvision.transforms
         '''
         if 'crop' in self.augment_mode:
-            if self.use_img:
+            if 'img' in self.modalities:
                 self.transforms['resized_crop']['img'] = \
                     RandomResizedCrop(size=self.bbox_size, # (h, w)
                                         scale=(0.75, 1), 
                                         ratio=(self.bbox_size[1]/self.bbox_size[0], 
                                                 self.bbox_size[1]/self.bbox_size[0]))  # w / h
-            if self.use_context:
+            if 'ctx' in self.modalities:
                 self.transforms['resized_crop']['ctx'] = RandomResizedCrop(size=self.ctx_size, # (h, w)
                                                                         scale=(0.75, 1), 
                                                                         ratio=(self.ctx_size[1]/self.ctx_size[0], self.ctx_size[1]/self.ctx_size[0]))  # w / h
-            if self.use_skeleton and self.skeleton_mode == 'pseudo_heatmap':
+            if 'sk' in self.modalities and self.sklt_format == 'pseudo_heatmap':
                 self.transforms['resized_crop']['sk'] = RandomResizedCrop(size=(48, 48), # (h, w)
                                                                             scale=(0.75, 1), 
                                                                             ratio=(1, 1))  # w / h
@@ -1054,7 +1009,6 @@ class PIEDataset(Dataset):
                            target_size=(224, 224), 
                            resize_mode='resize'):
         '''
-
         :param img_path:
         :param bbox: l, t, r, d
         :param target_size: W, H
@@ -1222,7 +1176,7 @@ class PIEDataset(Dataset):
             return all_samples
 
 
-def save_cropped_imgs(resize_mode='padded', 
+def save_cropped_imgs(resize_mode='even_padded', 
                       target_size=(224, 224), 
                       dataset_name='PIE', 
                       ):
