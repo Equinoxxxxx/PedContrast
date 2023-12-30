@@ -22,6 +22,7 @@ from ..utils import mapping_20, makedir, ltrb2xywh, coord2pseudo_heatmap, cls_we
 from ..data.transforms import RandomHorizontalFlip, RandomResizedCrop, crop_local_ctx
 from ..data.normalize import img_mean_std, norm_imgs
 from ..general import HiddenPrints
+from .dataset_id import DATASET2ID, ID2DATASET
 
 
 class PIEDataset(Dataset):
@@ -99,7 +100,7 @@ class PIEDataset(Dataset):
                             'hflip': None,
                             'resized_crop': {'img': None,
                                             'ctx': None,
-                                            'sk': None}}
+                                            'sklt': None}}
 
         # data opts
         if dataset_name == 'PIE':
@@ -198,6 +199,7 @@ class PIEDataset(Dataset):
         # get img name to obj id dict
         if self.dataset_name == 'PIE':
             if not os.path.exists(self.imgnm_to_objid_path):
+                # (set id ->) vid id -> img nm -> ped/veh -> oid -> bbox
                 self.imgnm_to_objid = \
                     self.get_imgnm_to_objid(self.p_tracks, 
                                             self.v_tracks, 
@@ -311,23 +313,31 @@ class PIEDataset(Dataset):
             obs_bboxes[:, 1] /= 1080
             obs_bboxes[:, 3] /= 1080
 
-        sample = {'ped_id_int': self.samples['obs_ped_id_int'][idx],
-                'img_nm_int': self.samples['obs_img_nm_int'][idx],
-                'vid_id_int': self.samples['obs_vid_id_int'][idx],
+        sample = {'dataset_name': torch.tensor(DATASET2ID[self.dataset_name]),
+                'set_id_int': self.samples['obs_set_id_int'][idx][-1],  # obs_len,
+                'vid_id_int': self.samples['obs_vid_id_int'][idx][-1],  # int
+                'ped_id_int': self.samples['obs_ped_id_int'][idx][-1],  # int out of (set id, vid id, ped id)
+                'img_nm_int': self.samples['obs_img_nm_int'][idx],  # obs_len,
                 'obs_bboxes':obs_bboxes, # obslen, 4
                 'obs_bboxes_unnormed': obs_bboxes_unnormed,
-                'pred_intent': target,   # int
-                'pred_bboxes': pred_bboxes,   # shape: [pred_len, 4]
                 'obs_ego': obs_ego,  # shape: obs len, 1
+                'pred_act': target,   # int
+                'pred_bboxes': pred_bboxes,   # shape: [pred_len, 4]
+                'atomic_actions': torch.tensor(0),
+                'simple_context': torch.tensor(0),
+                'complex_context': torch.tensor(0),  # (1,)
+                'communicative': torch.tensor(0),
+                'transporting': torch.tensor(0),
+                'age': torch.tensor(0),
                 'hflip_flag': torch.tensor(0),
                 'img_ijhw': torch.tensor([-1, -1, -1, -1]),
                 'ctx_ijhw': torch.tensor([-1, -1, -1, -1]),
-                'sk_ijhw': torch.tensor([-1, -1, -1, -1]),
+                'sklt_ijhw': torch.tensor([-1, -1, -1, -1]),
                 }
         if self.dataset_name == 'PIE':
             sample['set_id_int'] = self.samples['obs_set_id_int'][idx]
 
-        if 'sk' in self.modalities:
+        if 'sklt' in self.modalities:
             if self.sklt_format == 'coord':
                 pid = self.samples['obs_pid'][idx][0][0]
                 coords = []
@@ -459,10 +469,10 @@ class PIEDataset(Dataset):
                 # ped_imgs = torch.from_numpy(np.ascontiguousarray(ped_imgs.numpy()[::-1, :, :, :]))
                 ped_imgs = torch.flip(ped_imgs, dims=[0])
             sample['ped_imgs'] = ped_imgs  # shape [3, obs_len, H, W]
-        
+
         if 'ctx' in self.modalities:
             # print('-----------getting ctx-----------')
-            if self.ctx_format == 'mask_ped' or self.ctx_format == 'local' or self.ctx_format == 'ori_local' or self.ctx_format == 'ori':
+            if self.ctx_format in ('mask_ped', 'local', 'ori_local', 'ori'):
                 pid = self.samples['obs_pid'][idx][0][0]
                 ctx_imgs = []
                 ori_obs_img_paths = self.samples['obs_image_paths'][idx]
@@ -474,12 +484,15 @@ class PIEDataset(Dataset):
                 ctx_imgs = torch.from_numpy(ctx_imgs).float().permute(3, 0, 1, 2)
                 # normalize img
                 if self.img_norm_mode != 'ori':
-                    ctx_imgs = norm_imgs(ctx_imgs, self.img_mean, self.img_std)
+                    ctx_imgs = norm_imgs(ctx_imgs, 
+                                         self.img_mean, self.img_std)
                 # BGR -> RGB
                 if self.color_order == 'RGB':
-                    ctx_imgs = torch.from_numpy(np.ascontiguousarray(ctx_imgs.numpy()[::-1, :, :, :]))
+                   ctx_imgs = torch.flip(ctx_imgs, dims=[0])
                 sample['obs_context'] = ctx_imgs  # shape [3, obs_len, H, W]
-            elif self.ctx_format == 'seg_ori_local' or self.ctx_format == 'seg_local':
+            elif self.ctx_format in \
+                ('seg_ori_local', 'seg_local', 
+                 'ped_graph', 'ped_graph_all'):
                 # load imgs
                 ori_obs_img_paths = self.samples['obs_image_paths'][idx]
                 ctx_imgs = []
@@ -491,16 +504,20 @@ class PIEDataset(Dataset):
                 ctx_imgs = torch.from_numpy(ctx_imgs).float().permute(3, 0, 1, 2)  # CTHW
                 # norm imgs
                 if self.img_norm_mode != 'ori':
-                    ctx_imgs = norm_imgs(ctx_imgs, self.img_mean, self.img_std)
+                    ctx_imgs = norm_imgs(ctx_imgs, 
+                                         self.img_mean, 
+                                         self.img_std)
                 # BGR -> RGB
                 if self.color_order == 'RGB':
-                    ctx_imgs = torch.from_numpy(np.ascontiguousarray(ctx_imgs.numpy()[::-1, :, :, :]))  # CTHW
+                    ctx_imgs = torch.flip(ctx_imgs, dims=[0])  # CTHW
                 # load seg maps
                 ctx_segs = {c:[] for c in self.seg_cls}
                 if self.dataset_name == 'PIE':
                     for pth in ori_obs_img_paths:
                         s_nm, v_nm, i_nm = pth.split('/')[-3:]
-                        s_id, v_id, f_nm = str(int(s_nm.replace('set0', ''))), str(int(v_nm.replace('video_', ''))), i_nm.replace('png', 'pkl')
+                        s_id, v_id, f_nm = str(int(s_nm.replace('set0', ''))), \
+                                            str(int(v_nm.replace('video_', ''))), \
+                                                i_nm.replace('png', 'pkl')
                         for c in self.seg_cls:
                             seg_path = os.path.join(self.sam_seg_root, c, s_id, v_id, f_nm)
                             with open(seg_path, 'rb') as f:
@@ -531,9 +548,15 @@ class PIEDataset(Dataset):
                 for c in self.seg_cls:
                     all_seg.append(torch.stack(crop_segs[c], dim=1))  # 1Thw
                 all_seg = torch.stack(all_seg, dim=4)  # 1Thw n_cls
-                sample['obs_context'] = all_seg * torch.unsqueeze(crop_imgs, dim=-1)  # 3Thw n_cls
-
-        if self.pred_img:
+                if self.ctx_format == 'ped_graph':
+                    all_seg = torch.argmax(all_seg[0, -1], dim=-1, keepdim=True).permute(2, 0, 1)  # 1 h w
+                    sample['obs_context'] = torch.concat([crop_imgs[:, -1], all_seg], dim=0)
+                else:
+                    sample['obs_context'] = all_seg * torch.unsqueeze(crop_imgs, dim=-1)  # 3Thw n_cls
+            else:
+                raise ValueError(self.ctx_format)
+        
+        if 'interaction' in self.modalities:
             pass
         
         if self.pred_context:
@@ -572,7 +595,7 @@ class PIEDataset(Dataset):
                 sample['ped_imgs'] = TVF.hflip(sample['ped_imgs'])
             if 'ctx' in self.modalities:
                 sample['obs_context'] = TVF.hflip(sample['obs_context'])
-            if 'sk' in self.modalities and ('heatmap' in self.sk_mode):
+            if 'sklt' in self.modalities and ('heatmap' in self.sk_mode):
                 sample['obs_skeletons'] = TVF.hflip(sample['obs_skeletons'])
             if 'traj' in self.modalities:
                 sample['obs_bboxes_unnormed'][:, 0], sample['obs_bboxes_unnormed'][:, 2] = \
@@ -592,9 +615,9 @@ class PIEDataset(Dataset):
             sample['obs_context'], ijhw = self.transforms['resized_crop']['ctx'](sample['obs_context'])
             self.transforms['resized_crop']['ctx'].randomize_parameters()
             sample['ctx_ijhw'] = torch.tensor(ijhw)
-        if self.transforms['resized_crop']['sk'] is not None:
-            sample['obs_skeletons'], ijhw = self.transforms['resized_crop']['sk'](sample['obs_skeletons'])
-            self.transforms['resized_crop']['sk'].randomize_parameters()
+        if self.transforms['resized_crop']['sklt'] is not None:
+            sample['obs_skeletons'], ijhw = self.transforms['resized_crop']['sklt'](sample['obs_skeletons'])
+            self.transforms['resized_crop']['sklt'].randomize_parameters()
             sample['sk_ijhw'] = torch.tensor(ijhw)
         return sample
 
@@ -606,7 +629,7 @@ class PIEDataset(Dataset):
                 sample['ped_imgs'] = self.transforms['hflip'](sample['ped_imgs'])
             if 'ctx' in self.modalities:
                 sample['obs_context'] = self.transforms['hflip'](sample['obs_context'])
-            if 'sk' in self.modalities and ('heatmap' in self.sklt_format):
+            if 'sklt' in self.modalities and ('heatmap' in self.sklt_format):
                 sample['obs_skeletons'] = self.transforms['hflip'](sample['obs_skeletons'])
             if 'traj' in self.modalities and self.transforms['hflip'].flag:
                 sample['obs_bboxes_unnormed'][:, 0], sample['obs_bboxes_unnormed'][:, 2] = \
@@ -627,9 +650,9 @@ class PIEDataset(Dataset):
             sample['obs_context'], ijhw = self.transforms['resized_crop']['ctx'](sample['obs_context'])
             self.transforms['resized_crop']['ctx'].randomize_parameters()
             sample['ctx_ijhw'] = torch.tensor(ijhw)
-        if self.transforms['resized_crop']['sk'] is not None:
-            sample['obs_skeletons'], ijhw = self.transforms['resized_crop']['sk'](sample['obs_skeletons'])
-            self.transforms['resized_crop']['sk'].randomize_parameters()
+        if self.transforms['resized_crop']['sklt'] is not None:
+            sample['obs_skeletons'], ijhw = self.transforms['resized_crop']['sklt'](sample['obs_skeletons'])
+            self.transforms['resized_crop']['sklt'].randomize_parameters()
             sample['sk_ijhw'] = torch.tensor(ijhw)
         return sample
     
@@ -940,8 +963,8 @@ class PIEDataset(Dataset):
                 self.transforms['resized_crop']['ctx'] = RandomResizedCrop(size=self.ctx_size, # (h, w)
                                                                         scale=(0.75, 1), 
                                                                         ratio=(self.ctx_size[1]/self.ctx_size[0], self.ctx_size[1]/self.ctx_size[0]))  # w / h
-            if 'sk' in self.modalities and self.sklt_format == 'pseudo_heatmap':
-                self.transforms['resized_crop']['sk'] = RandomResizedCrop(size=(48, 48), # (h, w)
+            if 'sklt' in self.modalities and self.sklt_format == 'pseudo_heatmap':
+                self.transforms['resized_crop']['sklt'] = RandomResizedCrop(size=(48, 48), # (h, w)
                                                                             scale=(0.75, 1), 
                                                                             ratio=(1, 1))  # w / h
         if 'hflip' in self.augment_mode:

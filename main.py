@@ -294,7 +294,7 @@ def main(rank, world_size, args):
                                         modalities=modalities,
                                         img_format=img_format,
                                         sklt_format=sklt_format,
-                                        ctx_foramt=ctx_format,
+                                        ctx_format=ctx_format,
                                         traj_format=traj_format,
                                         ego_format=ego_format,
                                         augment_mode=augment_mode,
@@ -327,27 +327,13 @@ def main(rank, world_size, args):
             if name == 'nuscenes':
                 pass
                 
+    pre_cat_sets = [datasets['pre'][k] for k in datasets['pre']]
+    train_cat_sets = [datasets['train'][k] for k in datasets['train']]
+    val_cat_sets = [datasets['val'][k] for k in datasets['val']]
+    test_cat_sets = [datasets['test'][k] for k in datasets['test']]
 
 
-
-
-
-
-
-    val_datasets = [titan_val, pie_val, jaad_val]
-    test_datasets = [titan_test, pie_test, jaad_test]
-    if 'TITAN' in pre_dataset_names:
-        pre_datasets.append(titan_pre)
-    if 'PIE' in pre_dataset_names:
-        pre_datasets.append(pie_pre)
-    if 'JAAD' in pre_dataset_names:
-        pre_datasets.append(jaad_pre)
-    if 'TITAN' in train_dataset_names:
-        train_datasets.append(titan_train)
-    if 'PIE' in train_dataset_names:
-        train_datasets.append(pie_train)
-    if 'JAAD' in train_dataset_names:
-        train_datasets.append(jaad_train)
+    
     pre_loaders = []
     train_loaders = []
     val_loaders = []

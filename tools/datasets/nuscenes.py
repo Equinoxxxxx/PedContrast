@@ -5,6 +5,9 @@ from ..data.coord_transform import nusc_3dbbox_to_2dbbox
 from ..visualize import draw_box, draw_boxes_on_img
 from ..utils import makedir
 from ..data.preprocess import crop_img, crop_ctx
+from ..data.normalize import img_mean_std, norm_imgs
+from .dataset_id import DATASET2ID, ID2DATASET
+from ..data.transforms import RandomHorizontalFlip, RandomResizedCrop, crop_local_ctx
 
 import numpy as np
 import pickle
@@ -18,10 +21,13 @@ import pdb
 
 NUSC_ROOT = '/home/y_feng/workspace6/datasets/nusc/'
 
+
 class NuscDataset(torch.utils.data.Dataset):
     def __init__(self,
+                 data_root=NUSC_ROOT,
                  subset='train',
-                 obs_len=2, pred_len=2, overlap_ratio=0.5, recog_act=0,
+                 obs_len=2, pred_len=2, overlap_ratio=0.5, 
+                 recog_act=0,
                  tte=None,
                  norm_traj=True,
                  min_h=72,
@@ -29,11 +35,24 @@ class NuscDataset(torch.utils.data.Dataset):
                  min_vis_level=3,
                  sensor='CAM_FRONT',
                  interval=0,
-                 ego_accel=True,
+                 small_set=0,
+                 augment_mode='random_hflip',
+                 resize_mode='even_padded',
+                 ctx_size=(224, 224),
+                 color_order='BGR', 
+                 img_norm_mode='torch',
+                 modalities='img_sklt_ctx_traj_ego',
+                 img_format='',
+                 sklt_format='coords',
+                 ctx_format='ori_local',
+                 traj_format='ltrb',
+                 ego_format='accel',
+                 seg_cls=['person', 'vehicles', 'roads', 'traffic_lights'],
                  ):
         super().__init__()
+        self.data_root = data_root
         self.subset = subset
-        self.dataset_name = 'nusc'
+        self.dataset_name = 'nuscenes'
         self.obs_len = obs_len
         self.pred_len = pred_len
 
@@ -46,18 +65,37 @@ class NuscDataset(torch.utils.data.Dataset):
         self.min_vis_level = min_vis_level
         self.sensor = sensor
         self.interval = interval
+        self.small_set = small_set
+        self.augment_mode = augment_mode
+        self.resize_mode = resize_mode
+        self.ctx_size = ctx_size
+        self.color_order = color_order
+        self.img_norm_mode = img_norm_mode
+        self.modalities = modalities
+        self.img_format = img_format
+        self.sklt_format = sklt_format
+        self.ctx_format = ctx_format
+        self.traj_format = traj_format
+        self.ego_format = ego_format
+        self.seg_cls = seg_cls
         # sequence length considering interval
         self._obs_len = self.obs_len * (self.interval + 1)
         self._pred_len = self.pred_len * (self.interval + 1)
-        self.ego_accel = ego_accel
-        self.ego_motion_key = 'ego_accel' if self.ego_accel else 'ego_speed'
+        self.ego_motion_key = 'ego_accel' if 'accel' in self.ego_format else 'ego_speed'
         if self.subset == 'train':
             self.sce_names = TRAIN_SC
         elif self.subset == 'val':
             self.sce_names = VAL_SC
         else:
             raise ValueError(self.subset)
-
+        self.img_size = (900, 1600)
+        self.transforms = {'random': 0,
+                            'balance': 0,
+                            'hflip': None,
+                            'resized_crop': {'img': None,
+                                            'ctx': None,
+                                            'sklt': None}}
+        self.img_mean, self.img_std = img_mean_std(self.img_norm_mode)
         self._load_tk_id_dicts()
 
         self.nusc_root = NUSC_ROOT
@@ -88,7 +126,222 @@ class NuscDataset(torch.utils.data.Dataset):
         # convert tracks into samples
         self.samples = self.tracks_to_samples(self.p_tracks)
 
+        # get num samples
+        self.num_samples = len(self.samples['obs']['sam_id'])
 
+        # small set
+        if small_set > 0:
+            small_set_size = int(self.num_samples * small_set)
+            for k in self.samples['obs'].keys():
+                self.samples['obs'][k] = self.samples['obs'][k]\
+                    [:small_set_size]
+            for k in self.samples['pred'].keys():
+                self.samples['pred'][k] = self.samples['pred'][k]\
+                    [:small_set_size]
+            self.num_samples = small_set_size
+
+
+    def __len__(self):
+        return self.num_samples
+    
+    def __getitem__(self, idx):
+        obs_bbox = torch.tensor(self.samples['obs']['bbox_2d_normed'][idx]).float()
+        obs_bbox_unnormed = torch.tensor(self.samples['obs']['bbox_2d'][idx]).float()  # ltrb
+        pred_bbox = torch.tensor(self.samples['pred']['bbox_2d_normed'][idx]).float()
+        obs_ego = torch.tensor(self.samples['obs']['ego_motion'][idx]).float()
+        sce_id_int = torch.tensor(int(self.samples['obs']['sce_id'][idx][0]))
+        ins_id_int = torch.tensor(int(float(self.samples['obs']['ins_id'][idx][0])))
+        sam_id_int = torch.tensor(self.samples['obs']['sam_id'][idx])
+
+        # squeeze the coords
+        if '0-1' in self.traj_format:
+            obs_bbox[:, 0] /= self.img_size[1]
+            obs_bbox[:, 2] /= self.img_size[1]
+            obs_bbox[:, 1] /= self.img_size[0]
+            obs_bbox[:, 3] /= self.img_size[0]
+        sample = {'dataset_name': torch.tensor(DATASET2ID[self.dataset_name]),
+                  'set_id_int': torch.tensor(-1),
+                  'vid_id_int': sce_id_int,  # int
+                  'ped_id_int': ins_id_int,  # int
+                  'img_nm_int': sam_id_int,
+                  'obs_bboxes': obs_bbox,
+                  'obs_bboxes_unnormed': obs_bbox_unnormed,
+                  'obs_ego': obs_ego,
+                  'pred_act': torch.tensor(-1),
+                  'pred_bboxes': pred_bbox,
+                  'atomic_actions': torch.tensor(-1),
+                  'simple_context': torch.tensor(-1),
+                  'complex_context': torch.tensor(-1),  # (1,)
+                  'communicative': torch.tensor(-1),
+                  'transporting': torch.tensor(-1),
+                  'age': torch.tensor(-1),
+                  'hflip_flag': torch.tensor(0),
+                  'img_ijhw': torch.tensor([-1, -1, -1, -1]),
+                  'ctx_ijhw': torch.tensor([-1, -1, -1, -1]),
+                  'sklt_ijhw': torch.tensor([-1, -1, -1, -1]),
+                  }
+        if 'img' in self.modalities:
+            imgs = []
+            for sam_id in self.samples['obs']['sam_id'][idx]:
+                img_path = os.path.join(self.extra_root,
+                                        'cropped_images',
+                                        self.sensor,
+                                        self.resize_mode,
+                                        '224w_by_224h',
+                                        'ped',
+                                        str(self.samples['obs']['sce_id'][idx][0]),
+                                        str(sam_id)+'.png'
+                                        )
+                imgs.append(cv2.imread(img_path))
+            imgs = np.stack(imgs, axis=0)
+            # (T, H, W, C) -> (C, T, H, W)if self.sklt_format == 'pseudo_heatmap':
+            ped_imgs = torch.from_numpy(imgs).float().permute(3, 0, 1, 2)
+            # normalize img
+            if self.img_norm_mode != 'ori':
+                ped_imgs = norm_imgs(ped_imgs, self.img_mean, self.img_std)
+            # BGR -> RGB
+            if self.color_order == 'RGB':
+                ped_imgs = torch.flip(ped_imgs, dims=[0])
+            sample['ped_imgs'] = ped_imgs
+        if 'sklt' in self.modalities:
+            sklts = []
+            for sam_id in self.samples['obs']['sam_id'][idx]:
+                sklt_path = os.path.join(self.extra_root,
+                                        'sk_'+self.sklt_format+'s',
+                                        str(self.samples['obs']['sce_id'][idx][0]),
+                                        str(sam_id)+'.pkl'
+                                        )
+                with open(sklt_path, 'rb') as f:
+                    heatmap = pickle.load(f)
+                sklts.append(heatmap)
+            sklts = np.stack(sklts, axis=0)  # T, ...
+            if self.sklt_format == 'coord':
+                obs_skeletons = torch.from_numpy(sklts).float().permute(2, 0, 1)  # shape: (2, T, nj)
+            elif self.sklt_format == 'pseudo_heatmap':
+                # T C H W -> C T H W
+                obs_skeletons = torch.from_numpy(sklts).float().permute(1, 0, 2, 3)  # shape: (17, seq_len, 48, 48)
+            sample['obs_skeletons'] = obs_skeletons
+        if 'ctx' in self.modalities:
+            if self.ctx_format in ('local', 'ori_local', 'mask_ped', 'ori'):
+                ctx_imgs = []
+                for sam_id in self.samples['obs']['sam_id'][idx]:
+                    img_path = os.path.join(self.extra_root,
+                                        'context',
+                                        self.sensor,
+                                        self.ctx_format,
+                                        '224w_by_224h',
+                                        'ped',
+                                        str(self.samples['obs']['sce_id'][idx][0]),
+                                        str(sam_id)+'.png'
+                                        )
+                    ctx_imgs.append(cv2.imread(img_path))
+                ctx_imgs = np.stack(ctx_imgs, axis=0)
+                # (T, H, W, C) -> (C, T, H, W)
+                ctx_imgs = torch.from_numpy(ctx_imgs).float().\
+                    permute(3, 0, 1, 2)
+                # normalize img
+                if self.img_norm_mode != 'ori':
+                    ctx_imgs = norm_imgs(ctx_imgs, 
+                                         self.img_mean, self.img_std)
+                # RGB -> BGR
+                if self.color_order == 'RGB':
+                    ctx_imgs = torch.flip(ctx_imgs, dims=[0])
+                sample['obs_context'] = ctx_imgs  # shape [3, obs_len, H, W]
+            elif self.ctx_format in \
+                ('seg_ori_local', 'seg_local', 
+                 'ped_graph', 'ped_graph_all'):
+                ctx_imgs = []
+                for sam_id in self.samples['obs']['sam_id'][idx]:
+                    img_path = os.path.join(self.extra_root,
+                                        'context',
+                                        self.sensor,
+                                        'ori_local',
+                                        '224w_by_224h',
+                                        'ped',
+                                        str(self.samples['obs']['sce_id'][idx][0]),
+                                        str(sam_id)+'.png'
+                                        )
+                    ctx_imgs.append(cv2.imread(img_path))
+                ctx_imgs = np.stack(ctx_imgs, axis=0)
+                # (T, H, W, C) -> (C, T, H, W)
+                ctx_imgs = torch.from_numpy(ctx_imgs).float().permute(3, 0, 1, 2)
+                # normalize img
+                if self.img_norm_mode != 'ori':
+                    ctx_imgs = norm_imgs(ctx_imgs, self.img_mean, self.img_std)
+                # RGB -> BGR
+                if self.color_order == 'RGB':
+                    ctx_imgs = torch.flip(ctx_imgs, dims=[0])  # 3THW
+                # load segs
+                ctx_segs = {c:[] for c in self.seg_cls}
+                for c in self.seg_cls:
+                    for sam_id in self.samples['obs']['sam_id'][idx]:
+                        seg_path = os.path.join(
+                            self.extra_root,
+                            'seg_sam',
+                            self.sensor,
+                            c,
+                            sam_id+'.pkl'
+                        )
+                        with open(seg_path, 'rb') as f:
+                            seg = pickle.load(f)
+                        ctx_segs[c].append(torch.from_numpy(seg))
+                for c in self.seg_cls:
+                    ctx_segs[c] = torch.stack(ctx_segs[c], dim=0)  # THW
+                for c in self.seg_cls:
+                    ctx_segs[c] = torch.stack(ctx_segs[c], dim=0)  # THW
+                # crop seg
+                crop_segs = {c:[] for c in self.seg_cls}
+                for i in range(ctx_imgs.size(1)):  # T
+                    for c in self.seg_cls:
+                        crop_seg = crop_local_ctx(
+                            torch.unsqueeze(ctx_segs[c][i], dim=0), 
+                            obs_bbox_unnormed[i], 
+                            self.ctx_size, 
+                            interpo='nearest')  # 1 h w
+                        crop_segs[c].append(crop_seg)
+                all_seg = []
+                for c in self.seg_cls:
+                    all_seg.append(torch.stack(crop_segs[c], dim=1))  # 1Thw
+                all_seg = torch.stack(all_seg, dim=4)  # 1Thw n_cls
+                if self.ctx_format == 'ped_graph':
+                    all_seg = torch.argmax(all_seg[0, -1], dim=-1, keepdim=True).permute(2, 0, 1)  # 1 h w
+                    sample['obs_context'] = torch.concat([ctx_imgs[:, -1], all_seg], dim=0)
+                else:
+                    sample['obs_context'] = all_seg * torch.unsqueeze(ctx_imgs, dim=-1)  # 3Thw n_cls
+
+        # augmentation
+        if self.augment_mode != 'none':
+            if self.transforms['random']:
+                sample = self._random_augment(sample)
+
+    def _random_augment(self, sample):
+        # flip
+        if self.transforms['hflip'] is not None:
+            self.transforms['hflip'].randomize_parameters()
+            sample['hflip_flag'] = torch.tensor(self.transforms['hflip'].flag)
+            # print('before aug', self.transforms['hflip'].flag, sample['hflip_flag'], self.transforms['hflip'].random_p)
+            if 'img' in self.modalities:
+                sample['ped_imgs'] = self.transforms['hflip'](sample['ped_imgs'])
+            # print('-1', self.transforms['hflip'].flag, sample['hflip_flag'], self.transforms['hflip'].random_p)
+            if 'ctx' in self.modalities:
+                if self.ctx_format == 'seg_ori_local' or self.ctx_format == 'seg_local':
+                    sample['obs_context'] = self.transforms['hflip'](sample['obs_context'].permute(4, 0, 1, 2, 3)).permute(1, 2, 3, 4, 0)
+                sample['obs_context'] = self.transforms['hflip'](sample['obs_context'])
+            if 'sklt' in self.modalities and ('heatmap' in self.sklt_format):
+                sample['obs_skeletons'] = self.transforms['hflip'](sample['obs_skeletons'])
+            if 'traj' in self.modalities and self.transforms['hflip'].flag:
+                sample['obs_bboxes_unnormed'][:, 0], sample['obs_bboxes_unnormed'][:, 2] = \
+                    2704 - sample['obs_bboxes_unnormed'][:, 2], 2704 - sample['obs_bboxes_unnormed'][:, 0]
+                if '0-1' in self.traj_format:
+                    sample['obs_bboxes'][:, 0], sample['obs_bboxes'][:, 2] =\
+                         1 - sample['obs_bboxes'][:, 2], 1 - sample['obs_bboxes'][:, 0]
+                else:
+                    sample['obs_bboxes'][:, 0], sample['obs_bboxes'][:, 2] =\
+                         2704 - sample['obs_bboxes'][:, 2], 2704 - sample['obs_bboxes'][:, 0]
+            if 'ego' in self.modalities and self.transforms['hflip'].flag:
+                sample['obs_ego'][:, -1] = -sample['obs_ego'][:, -1]
+        return sample
+    
     def _load_tk_id_dicts(self):
         f = open('/home/y_feng/workspace6/datasets/nusc/extra/token_id/trainval_scene_id_to_token.pkl', 'rb')
         self.scene_id_to_token = pickle.load(f)
@@ -138,7 +391,7 @@ class NuscDataset(torch.utils.data.Dataset):
                     'bbox_2d': [],
                     'ego_speed': []}
         # discard the last frame
-        min_track_len = self.obs_len + self.pred_len + 1  
+        min_track_len = self._obs_len + self._pred_len + 1  
         anns_path = '_'.join(['anns', 
                               self.subset, 
                               obj_type, 
@@ -147,7 +400,7 @@ class NuscDataset(torch.utils.data.Dataset):
         anns_path = os.path.join(self.extra_root, anns_path)
         with open(anns_path, 'rb') as f:
             instk_to_anntk = pickle.load(f)
-        print('Getting pedestrian tracks')
+        print('Getting tracks')
         for instk in tqdm(instk_to_anntk):
             ann_seqs = instk_to_anntk[instk]
             for seq in ann_seqs:
@@ -171,7 +424,7 @@ class NuscDataset(torch.utils.data.Dataset):
                         if processing and \
                             len(obj_tracks['ego_speed'][-1]) < min_track_len:
                             for k in obj_tracks:
-                                # delete the recent ended seq
+                                # delete the recently ended seq
                                 obj_tracks[k].pop(-1)
                         processing = False
                         continue
@@ -203,6 +456,11 @@ class NuscDataset(torch.utils.data.Dataset):
                         obj_tracks['bbox_3d'].append([corners3d])
                         obj_tracks['img_nm'].append([img_nm])
                         obj_tracks['ego_speed'].append([ego_vel])
+                # check if length >= min length
+                if processing and len(obj_tracks['ego_speed'][-1]) < min_track_len:
+                    for k in obj_tracks:
+                        # delete the recently ended seq
+                        obj_tracks[k].pop(-1)
         return obj_tracks    
     
     def _get_accel(self, p_tracks):
@@ -309,7 +567,6 @@ class NuscDataset(torch.utils.data.Dataset):
         with open(save_path, 'wb') as f:
             pickle.dump(imgnm_to_oid_to_info, f)
         return imgnm_to_oid_to_info
-
 
     def tracks_to_samples(self, tracks):
         seq_len = self.obs_len + self.pred_len

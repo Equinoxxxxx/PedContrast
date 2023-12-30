@@ -13,7 +13,6 @@ import numpy as np
 # cv2.ocl.setUseOpenCL(False)
 import time
 import copy
-import tqdm
 import os
 from tqdm import tqdm
 import pdb
@@ -23,9 +22,10 @@ from .pie_data import PIE
 from .jaad_data import JAAD
 from ..utils import makedir
 from ..utils import mapping_20, ltrb2xywh, coord2pseudo_heatmap, TITANclip_txt2list, cls_weights
-from ..data._img_mean_std import img_mean_std
+from ..data.normalize import img_mean_std, norm_imgs
 from ..data.transforms import RandomHorizontalFlip, RandomResizedCrop, crop_local_ctx
 from torchvision.transforms import functional as TVF
+from .dataset_id import DATASET2ID, ID2DATASET
 
 
 ATOM_ACTION_LABEL_ORI = {  # 3 no samples; 7, 8 no test samples
@@ -239,7 +239,7 @@ class TITAN_dataset(Dataset):
                  resize_mode='even_padded', img_size=(224, 224),
                  modalities='',
                  img_format='',
-                 ctx_foramt='local', ctx_size=(224, 224),
+                 ctx_format='local', ctx_size=(224, 224),
                  sklt_format='pseudo_heatmap',
                  traj_format='ltrb',
                  ego_format='',
@@ -270,7 +270,7 @@ class TITAN_dataset(Dataset):
         self.resize_mode = resize_mode
         self.img_size = img_size
         self.img_format = img_format
-        self.ctx_format = ctx_foramt
+        self.ctx_format = ctx_format
         self.ctx_size = ctx_size
         self.sklt_format = sklt_format
         self.traj_format = traj_format
@@ -295,7 +295,7 @@ class TITAN_dataset(Dataset):
                             'hflip': None,
                             'resized_crop': {'img': None,
                                             'ctx': None,
-                                            'sk': None}}
+                                            'sklt': None}}
 
         self.ori_data_root = '/home/y_feng/workspace6/datasets/TITAN/honda_titan_dataset/dataset'
         self.extra_data_root = '/home/y_feng/workspace6/datasets/TITAN/TITAN_extra'
@@ -385,7 +385,7 @@ class TITAN_dataset(Dataset):
 
         self.samples = self.track2sample(self.p_tracks_filtered)
 
-        # convert samples to ndarray ?
+        # convert samples to ndarray
 
         # num samples
         self.num_samples = len(self.samples['obs']['img_nm'])
@@ -526,10 +526,10 @@ class TITAN_dataset(Dataset):
             obs_bbox[:, 3] /= 1520
         # act labels
         if self.multi_label_cross:
-            pred_intent = torch.tensor([self.samples[self.obs_or_pred]\
+            target = torch.tensor([self.samples[self.obs_or_pred]\
                                         ['simple_context'][idx][-1]])  # int
         else:
-            pred_intent = torch.tensor([self.samples[self.obs_or_pred]\
+            target = torch.tensor([self.samples[self.obs_or_pred]\
                                         ['crossing'][idx][-1]])  # int
         simple_context = torch.tensor([self.samples[self.obs_or_pred]\
                                        ['simple_context'][idx][-1]])
@@ -542,23 +542,26 @@ class TITAN_dataset(Dataset):
         transporting = torch.tensor([self.samples[self.obs_or_pred]\
                                      ['transporting'][idx][-1]])
         age = torch.tensor(self.samples[self.obs_or_pred]['age'][idx])
-        sample = {'ped_id_int': ped_id_int,
-                  'clip_id_int': clip_id_int,
+        sample = {'dataset_name': torch.tensor(DATASET2ID[self.dataset_name]),
+                  'set_id_int': torch.tensor(-1),
+                  'vid_id_int': clip_id_int,  # int
+                  'ped_id_int': ped_id_int,  # int
                   'img_nm_int': img_nm_int,
                   'obs_bboxes': obs_bbox,
                   'obs_bboxes_unnormed': obs_bbox_unnormed,
                   'obs_ego': obs_ego,
-                  'pred_intent': pred_intent,
+                  'pred_act': target,
+                  'pred_bboxes': pred_bbox,
                   'atomic_actions': atomic_action,
                   'simple_context': simple_context,
                   'complex_context': complex_context,  # (1,)
                   'communicative': communicative,
                   'transporting': transporting,
                   'age': age,
-                  'hflip_flag': torch.tensor(0),
+                  'hflip_flag': torch.tensor(-1),
                   'img_ijhw': torch.tensor([-1, -1, -1, -1]),
                   'ctx_ijhw': torch.tensor([-1, -1, -1, -1]),
-                  'sk_ijhw': torch.tensor([-1, -1, -1, -1]),
+                  'sklt_ijhw': torch.tensor([-1, -1, -1, -1]),
                   }
         if 'img' in self.modalities:
             imgs = []
@@ -576,17 +579,10 @@ class TITAN_dataset(Dataset):
             ped_imgs = torch.from_numpy(imgs).float().permute(3, 0, 1, 2)
             # normalize img
             if self.img_norm_mode != 'ori':
-                ped_imgs /= 255.
-                ped_imgs[0, :, :, :] -= self.img_mean[0]
-                ped_imgs[1, :, :, :] -= self.img_mean[1]
-                ped_imgs[2, :, :, :] -= self.img_mean[2]
-                ped_imgs[0, :, :, :] /= self.img_std[0]
-                ped_imgs[1, :, :, :] /= self.img_std[1]
-                ped_imgs[2, :, :, :] /= self.img_std[2]
+                ped_imgs = norm_imgs(ped_imgs, self.img_mean, self.img_std)
             # BGR -> RGB
             if self.color_order == 'RGB':
-                ped_imgs = torch.from_numpy(
-                    np.ascontiguousarray(ped_imgs.numpy()[::-1, :, :, :]))
+                ped_imgs = torch.flip(ped_imgs, dims=[0])
             sample['ped_imgs'] = ped_imgs
         if 'ctx' in self.modalities:
             if self.ctx_format in ('local', 'ori_local', 'mask_ped', 'ori'):
@@ -607,21 +603,16 @@ class TITAN_dataset(Dataset):
                     permute(3, 0, 1, 2)
                 # normalize img
                 if self.img_norm_mode != 'ori':
-                    ctx_imgs /= 255.
-                    ctx_imgs[0, :, :, :] -= self.img_mean[0]
-                    ctx_imgs[1, :, :, :] -= self.img_mean[1]
-                    ctx_imgs[2, :, :, :] -= self.img_mean[2]
-                    ctx_imgs[0, :, :, :] /= self.img_std[0]
-                    ctx_imgs[1, :, :, :] /= self.img_std[1]
-                    ctx_imgs[2, :, :, :] /= self.img_std[2]
+                    ctx_imgs = norm_imgs(ctx_imgs, 
+                                         self.img_mean, self.img_std)
                 # RGB -> BGR
                 if self.color_order == 'RGB':
-                    ctx_imgs = torch.from_numpy(\
-                        np.ascontiguousarray(ctx_imgs.numpy()[::-1, :, :, :]))
+                    ctx_imgs = torch.flip(ctx_imgs, dims=[0])
                 sample['obs_context'] = ctx_imgs  # shape [3, obs_len, H, W]
             
-            elif self.ctx_format == 'seg_ori_local' \
-                or self.ctx_format == 'seg_local':
+            elif self.ctx_format in \
+                ('seg_ori_local', 'seg_local', 
+                 'ped_graph', 'ped_graph_all'):
                 # load imgs
                 ctx_imgs = []
                 for img_nm in self.samples['obs']['img_nm'][idx]:
@@ -637,17 +628,10 @@ class TITAN_dataset(Dataset):
                 ctx_imgs = torch.from_numpy(ctx_imgs).float().permute(3, 0, 1, 2)
                 # normalize img
                 if self.img_norm_mode != 'ori':
-                    ctx_imgs /= 255.
-                    ctx_imgs[0, :, :, :] -= self.img_mean[0]
-                    ctx_imgs[1, :, :, :] -= self.img_mean[1]
-                    ctx_imgs[2, :, :, :] -= self.img_mean[2]
-                    ctx_imgs[0, :, :, :] /= self.img_std[0]
-                    ctx_imgs[1, :, :, :] /= self.img_std[1]
-                    ctx_imgs[2, :, :, :] /= self.img_std[2]
+                    ctx_imgs = norm_imgs(ctx_imgs, self.img_mean, self.img_std)
                 # RGB -> BGR
                 if self.color_order == 'RGB':
-                    ctx_imgs = torch.from_numpy(\
-                        np.ascontiguousarray(ctx_imgs.numpy()[::-1, :, :, :]))  # 3THW
+                    ctx_imgs = torch.flip(ctx_imgs, dims=[0])  # 3THW
                 # load segs
                 ctx_segs = {c:[] for c in self.seg_cls}
                 for c in self.seg_cls:
@@ -674,9 +658,11 @@ class TITAN_dataset(Dataset):
                 for c in self.seg_cls:
                     all_seg.append(torch.stack(crop_segs[c], dim=1))  # 1Thw
                 all_seg = torch.stack(all_seg, dim=4)  # 1Thw n_cls
-                sample['obs_context'] = \
-                    all_seg * torch.unsqueeze(ctx_imgs, 
-                dim=-1)  # 3Thw n_cls
+                if self.ctx_format == 'ped_graph':
+                    all_seg = torch.argmax(all_seg[0, -1], dim=-1, keepdim=True).permute(2, 0, 1)  # 1 h w
+                    sample['obs_context'] = torch.concat([ctx_imgs[:, -1], all_seg], dim=0)
+                else:
+                    sample['obs_context'] = all_seg * torch.unsqueeze(ctx_imgs, dim=-1)  # 3Thw n_cls
                 
         if 'sklt' in self.modalities:
             if self.sklt_format == 'pseudo_heatmap':
@@ -752,10 +738,10 @@ class TITAN_dataset(Dataset):
             sample['obs_context'], ijhw = self.transforms['resized_crop']['ctx'](sample['obs_context'])
             self.transforms['resized_crop']['ctx'].randomize_parameters()
             sample['ctx_ijhw'] = torch.tensor(ijhw)
-        if self.transforms['resized_crop']['sk'] is not None:
-            sample['obs_skeletons'], ijhw = self.transforms['resized_crop']['sk'](sample['obs_skeletons'])
-            self.transforms['resized_crop']['sk'].randomize_parameters()
-            sample['sk_ijhw'] = torch.tensor(ijhw)
+        if self.transforms['resized_crop']['sklt'] is not None:
+            sample['obs_skeletons'], ijhw = self.transforms['resized_crop']['sklt'](sample['obs_skeletons'])
+            self.transforms['resized_crop']['sklt'].randomize_parameters()
+            sample['sklt_ijhw'] = torch.tensor(ijhw)
         return sample
 
     def _random_augment(self, sample):
@@ -797,7 +783,7 @@ class TITAN_dataset(Dataset):
         if self.transforms['resized_crop']['sk'] is not None:
             self.transforms['resized_crop']['sk'].randomize_parameters()
             sample['obs_skeletons'], ijhw = self.transforms['resized_crop']['sk'](sample['obs_skeletons'])
-            sample['sk_ijhw'] = torch.tensor(ijhw)
+            sample['sklt_ijhw'] = torch.tensor(ijhw)
         return sample
 
     def add_cid(self):
@@ -944,16 +930,22 @@ class TITAN_dataset(Dataset):
                             for k in p_tracks:
                                 p_tracks[k].pop(-1)
                             break
-                        # start a new track
                         else:
-                            # init new track
+                            # init a new track
                             for k in p_tracks.keys():
                                 p_tracks[k].append([])
                             continue
+                    cur_img_nm_int = int(line[0].replace('.png', ''))
+                    # check continuity
+                    if len(p_tracks['img_nm_int'][-1])>0 and \
+                        cur_img_nm_int-p_tracks['img_nm_int'][-1][-1]>6:
+                        # init a new track
+                        for k in p_tracks.keys():
+                            p_tracks[k].append([])
                     p_tracks['clip_id'][-1].append(cid)  # str
                     p_tracks['obj_id'][-1].append(str(int(float(pid))))  # str
                     p_tracks['img_nm'][-1].append(line[0])  # str
-                    p_tracks['img_nm_int'][-1].append(int(line[0].replace('.png', '')))
+                    p_tracks['img_nm_int'][-1].append(cur_img_nm_int)
                     tlhw = list(map(float, line[3: 7]))
                     ltrb = [tlhw[1], tlhw[0], tlhw[1]+tlhw[3], tlhw[0]+tlhw[2]]
                     p_tracks['bbox'][-1].append(ltrb)

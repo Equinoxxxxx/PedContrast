@@ -1,6 +1,12 @@
 import cv2
 import numpy as np
+import os
+import pickle
+import json
+from ..utils import makedir
 
+
+# bdd100k procedure: get vid_id2nm --> crop images --> get skeletons & segmentation maps
 
 def crop_img(img, bbox, resize_mode, target_size=(224, 224)):
     l, t, r, b = list(map(int, bbox))
@@ -65,3 +71,143 @@ def crop_ctx(img, bbox, mode, target_size=(224, 224)):
     return resized
 
 
+def bdd100k_get_vidnm2vidid(data_root='/home/y_feng/workspace6/datasets/BDD100k/bdd100k',
+                            sub_set='train_val'):
+    vid_nms = []
+    id2nm = {}
+    nm2id = {}
+    _subsets = sub_set.split('_')
+    for _subset in _subsets:
+        path = os.path.join(data_root, 'images', 'track', _subset)
+        for vid in os.listdir(path):
+            vid_nms.append(vid)
+    _vid_nms = set(vid_nms)
+    assert len(_vid_nms) == len(vid_nms)
+    for i in range(len(vid_nms)):
+        nm = vid_nms[i]
+        id2nm[i] = nm
+        nm2id[nm] = i
+    with open(os.path.join(data_root, 'extra', 'vid_id2nm.pkl'), 'wb') as f:
+        pickle.dump(id2nm, f)
+    with open(os.path.join(data_root, 'extra', 'vid_nm2id.pkl'), 'wb') as f:
+        pickle.dump(nm2id, f)
+    return id2nm, nm2id
+
+def crop_img_ctx_bdd100k(data_root='/home/y_feng/workspace6/datasets/BDD100k/bdd100k',
+                     sub_set='train_val',
+                     resize_mode='even_padded',
+                     ctx_format='ori_local',
+                     img_size=(224, 224)):
+    vid_nm2id_path = os.path.join(data_root, 'extra', 'vid_nm2id.pkl')
+    with open(vid_nm2id_path, 'rb') as f:
+        vid_nm2id = pickle.load(f)
+    img_root = os.path.join(data_root, 'images', 'track')
+    label_root = os.path.join(data_root, 'labels', 'box_track_20')
+    crop_root = os.path.join(data_root, 
+                             'extra', 
+                             'cropped_images', 
+                             resize_mode,
+                             f'{img_size[1]}w_by_{img_size[0]}h')
+    makedir(crop_root)
+    if ctx_format != '':
+        ctx_root = os.path.join(data_root, 
+                                'extra', 
+                                'context', 
+                                ctx_format,
+                                f'{img_size[1]}w_by_{img_size[0]}h')
+        makedir(ctx_root)
+    for _subset in sub_set.split('_'):
+        label_dir = os.path.joni(label_root, _subset)
+        # traverse video
+        for lfnm in os.listdir(label_dir):
+            l_path = os.path.join(label_dir, lfnm)
+            with open(l_path) as f:
+                vid_l = json.load(f)  # list
+            vid_nm = lfnm.replace('.json', '')
+            vid_id = vid_nm2id[vid_nm]
+            # traverse label
+            for img_l in vid_l:
+                img_nm = img_l['name']
+                img_id = img_nm.split('-')[-1].replace('.jpg', '')
+                img_id_int = int(img_id)
+                for l in img_l['labels']:
+                    cls = l['category']
+                    oid = l['id']
+                    oid_int = int(oid)
+                    cls_k = 'ped' if cls in ('other person', 'pedestrian', 'rider') else 'veh'
+                    ltrb = [l['bbox_2d']['x1'],
+                            l['bbox_2d']['y1'],
+                            l['bbox_2d']['x2'],
+                            l['bbox_2d']['y2']]
+                    img = cv2.imread(os.path.join(img_root, 
+                                                  _subset,
+                                                  vid_nm,
+                                                  img_nm))
+                    # save cropped images
+                    tgt_crop_dir = os.path.join(crop_root,
+                                           cls_k,
+                                           str(oid_int),
+                                           )
+                    makedir(tgt_crop_dir)
+                    tgt_crop_path = os.path.join(tgt_crop_dir,
+                                                 str(img_id_int)+'.png')
+                    cropped = crop_img(img,
+                                       ltrb,
+                                       resize_mode,
+                                       img_size)
+                    cv2.imwrite(tgt_crop_path, cropped)
+                    # save ctx
+                    if ctx_format != '':
+                        tgt_ctx_dir = os.path.join(ctx_root,
+                                                    cls_k,
+                                                    str(oid_int),
+                                                    )
+                        makedir(tgt_ctx_dir)
+                        tgt_ctx_path = os.path.join(tgt_ctx_dir,
+                                                    str(img_id_int)+'.png')
+                        cropped = crop_ctx(img,
+                                        ltrb,
+                                        ctx_format,
+                                        img_size)
+                        cv2.imwrite(tgt_ctx_path, cropped)
+
+def get_skeleton_bdd100k()
+    
+
+
+if __name__ == '__main__':
+    # get video name to id
+    # bdd100k_get_vidnm2vidid()
+    # path = '/home/y_feng/workspace6/datasets/BDD100k/bdd100k/extra/vid_id2nm.pkl'
+    # with open(path, 'rb') as f:
+    #     a = pickle.load(f)
+    # for k in a:
+    #     print(a[k])
+    # print('', len(a))
+    
+    # check obj id
+    vid_nm2id_path = '/home/y_feng/workspace6/datasets/BDD100k/bdd100k/extra/vid_nm2id.pkl'
+    with open(vid_nm2id_path, 'rb') as f:
+        vid_nm2id = pickle.load(f)
+    label_root = '/home/y_feng/workspace6/datasets/BDD100k/bdd100k/labels/box_track_20'
+
+    vidid2oid = {}
+    oids_all = set()
+    num_obj = 0
+    for subset in os.listdir(label_root):
+        set_dir = os.path.join(label_root, subset)
+        for fnm in os.listdir(set_dir):
+            vidid = fnm.replace('.json', '')
+            with open(os.path.join(set_dir, fnm)) as f:
+                vid_content = json.load(f)
+            cls2oid = {}
+            for frame in vid_content:
+                for label in frame['labels']:
+                    cls = label['category']
+                    if cls not in cls2oid:
+                        cls2oid[cls] = set()
+                    cls2oid[cls].add(label['id'])
+            for cls in cls2oid:
+                oids_all = oids_all.union(cls2oid[cls])
+                num_obj += len(cls2oid[cls])
+    print(len(oids_all), num_obj)
