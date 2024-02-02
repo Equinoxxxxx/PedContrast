@@ -4,6 +4,8 @@ import torch
 import os
 import scipy
 import cv2
+cv2.setNumThreads(0)
+cv2.ocl.setUseOpenCL(False)
 import numpy as np
 import matplotlib.pyplot as plt
 import sklearn
@@ -100,7 +102,7 @@ def makedir(path):
 
 def seed_all(seed_value):
     random.seed(seed_value) # Python
-    np.random.seed(seed_value) # cpu vars
+    # np.random.seed(seed_value) # cpu vars
     torch.manual_seed(seed_value) # cpu  vars
     
     if torch.cuda.is_available(): 
@@ -718,7 +720,7 @@ def get_cls_weights_multi(model,
         if use_age:
             age_weight = cls_weights(dataloader.dataset.num_samples_age, loss_weight, device=device)
     
-    multi_weights = {'final': weight,
+    multi_weights = {'cross': weight,
                     'atomic': atomic_weight,
                     'complex': complex_weight,
                     'communicative': communicative_weight,

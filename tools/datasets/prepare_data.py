@@ -4,7 +4,7 @@ from tqdm import tqdm
 
 from .TITAN import TITAN_dataset
 from .PIE_JAAD import PIEDataset
-from .nuscenes import NuscDataset
+from .nuscenes_dataset import NuscDataset
 from ..data.preprocess import crop_ctx, crop_img
 
 

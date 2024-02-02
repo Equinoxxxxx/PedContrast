@@ -7,8 +7,8 @@ import torch.nn.functional as F
 from torchvision.transforms import functional as TVF
 import numpy as np
 import cv2
-# cv2.setNumThreads(0)
-# cv2.ocl.setUseOpenCL(False)
+cv2.setNumThreads(0)
+cv2.ocl.setUseOpenCL(False)
 import time
 import copy
 import tqdm
@@ -28,35 +28,36 @@ from .dataset_id import DATASET2ID, ID2DATASET
 class PIEDataset(Dataset):
     def __init__(self, 
                  dataset_name='PIE', 
-                 normalize_pos=True, 
+                 normalize_pos=False, 
                  img_norm_mode='torch', 
                  data_split_type='default',
                  seq_type='crossing', 
-                 obs_len=16, pred_len=1, overlap_retio=0.5,
-                 do_balance=True,
+                 obs_len=4, pred_len=4, overlap_ratio=0.5,
+                 obs_fps=2,
+                 do_balance=False,
                  subset='train', 
                  bbox_size=(224, 224), ctx_size=(224, 224), 
-                 color_order='BGR', crop_from_ori=False, load_all_img=False, 
+                 color_order='BGR', crop_from_ori=False,
                  resize_mode='even_padded', min_wh=None, max_occ=2, 
-                 modalities='',
+                 modalities=['img', 'sklt', 'ctx', 'traj', 'ego'],
                  img_format='',
                  sklt_format='coord', 
-                 ctx_format='mask_ped', 
+                 ctx_format='ori_local', 
                  traj_format='ltrb', 
                  ego_format='accel',
                  pred_img=0,
                  pred_context=0, pred_context_mode='ori',
-                 small_set=0, seg_class_set=1,
+                 small_set=0,
                  tte=[30, 60],
                  recog_act=0,
-                 obs_interval=0.,
-                 augment_mode='none',
-                 seg_cls=['person', 'vehicles', 'roads', 'traffic_lights'],
-                 ego_accel=True,
+                 augment_mode='random_hflip',
+                 seg_cls=['person', 'vehicle', 'road', 'traffic_light'],
                  speed_unit='m/s',
                  ):
         super(Dataset, self).__init__()
         self.dataset_name = dataset_name
+        self.fps = 30
+        self.img_size = (1080, 1920)
         self.seq_type = seq_type
         self.tte = tte
         self.recog_act = recog_act
@@ -67,16 +68,15 @@ class PIEDataset(Dataset):
         self.img_mean, self.img_std = img_mean_std(self.img_norm_mode)  # BGR
         self.obs_len = obs_len
         self.pred_len = pred_len
-        self.overlap_ratio = overlap_retio
+        self.overlap_ratio = overlap_ratio
         self.bbox_size = bbox_size
-        self.obs_interval = obs_interval
+        self.obs_interval = self.fps // obs_fps - 1
 
         # interval
         self._obs_len = self.obs_len * (self.obs_interval + 1)
         self._pred_len = self.pred_len * (self.obs_interval + 1)
 
         self.crop_from_ori = crop_from_ori
-        self.load_all_img = load_all_img
         self.resize_mode = resize_mode
         self.modalities = modalities
         self.img_format = img_format
@@ -91,8 +91,7 @@ class PIEDataset(Dataset):
         self.pred_context_mode = pred_context_mode
         self.augment_mode = augment_mode
         self.seg_cls = seg_cls
-        self.ego_accel = ego_accel
-        self.ego_motion_key = 'ego_accel' if self.ego_accel else 'obd_speed'
+        self.ego_motion_key = 'ego_accel' if 'accel' in self.ego_format else 'obd_speed'
         if self.dataset_name == 'JAAD':
             self.ego_motion_key = 'vehicle_act'
         self.speed_unit = speed_unit
@@ -122,7 +121,7 @@ class PIEDataset(Dataset):
                          'min_track_size': self._obs_len + self._pred_len,  # discard tracks that are shorter
                          'max_size_observe': self._obs_len,  # number of observation frames
                          'max_size_predict': self._pred_len,  # number of prediction frames
-                         'seq_overlap_rate': overlap_retio,  # how much consecutive sequences overlap
+                         'seq_overlap_rate': overlap_ratio,  # how much consecutive sequences overlap
                          'balance': do_balance,  # balance the training and testing samples
                          'crop_type': 'context',  # crop 2x size of bbox around the pedestrian
                          'crop_mode': 'pad_resize',  # pad with 0s and resize to VGG input
@@ -189,8 +188,8 @@ class PIEDataset(Dataset):
                     self._convert_speed_unit(self.p_tracks['obd_speed'])
         # calc acceleration
         if self.dataset_name == 'PIE':
-            if self.ego_accel:
-                self.p_tracks = self._calc_accel(self.p_tracks)
+            if 'accel' in self.ego_format:
+                self.p_tracks = self._get_accel(self.p_tracks)
 
         # get vehicle tracks
         with open(self.veh_info_path, 'rb') as f:
@@ -245,9 +244,13 @@ class PIEDataset(Dataset):
         
         # add seg maps in samples
         if 'ctx' in self.modalities:
+            if self.ctx_format == 'ped_graph':
+                ctx_format_dir = 'ori_local'
+            else:
+                ctx_format_dir = self.ctx_format
             self.ctx_path = os.path.join(self.root_path, 
                                          'context', 
-                                         self.ctx_format, 
+                                         ctx_format_dir, 
                                          str(ctx_size[0])+'w_by_'\
                                             +str(ctx_size[1])+'h')
             if self.ctx_format == 'seg_multi' \
@@ -298,12 +301,11 @@ class PIEDataset(Dataset):
         obs_bboxes = torch.tensor(self.samples['obs_bbox_normed'][idx]).float()  # ltrb
         obs_bboxes_unnormed = torch.tensor(self.samples['obs_bbox'][idx]).float()  # ltrb
         pred_bboxes = torch.tensor(self.samples['pred_bbox_normed'][idx]).float()
-        target = torch.tensor(self.samples['target'][idx][0])
+        target = torch.tensor(self.samples['target'][idx][-1])
         obs_ego = \
-            torch.tensor(self.samples['obs_ego'][idx]).float().reshape(-1, 1)
-        if obs_ego.size(-1) == 1:
-            obs_ego = torch.concat([obs_ego, torch.zeros(obs_ego.size())], 
-                                   dim=-1)
+            torch.tensor(self.samples['obs_ego'][idx]).float().reshape(-1)
+        set_id_int = self.samples['obs_set_id_int'][idx][-1] if self.dataset_name == 'PIE' else 0
+
         # obs_ego = torch.cat([obs_ego, torch.zeros(obs_ego.size())], dim=-1)
 
         # normalize the coordinates
@@ -314,10 +316,10 @@ class PIEDataset(Dataset):
             obs_bboxes[:, 3] /= 1080
 
         sample = {'dataset_name': torch.tensor(DATASET2ID[self.dataset_name]),
-                'set_id_int': self.samples['obs_set_id_int'][idx][-1],  # obs_len,
-                'vid_id_int': self.samples['obs_vid_id_int'][idx][-1],  # int
-                'ped_id_int': self.samples['obs_ped_id_int'][idx][-1],  # int out of (set id, vid id, ped id)
-                'img_nm_int': self.samples['obs_img_nm_int'][idx],  # obs_len,
+                'set_id_int': torch.tensor(set_id_int),  # obs_len,
+                'vid_id_int': torch.tensor(self.samples['obs_vid_id_int'][idx][-1]),  # int
+                'ped_id_int': torch.tensor(self.samples['obs_ped_id_int'][idx][-1]),  # int out of (set id, vid id, ped id)
+                'img_nm_int': torch.tensor(self.samples['obs_img_nm_int'][idx]),  # obs_len,
                 'obs_bboxes':obs_bboxes, # obslen, 4
                 'obs_bboxes_unnormed': obs_bboxes_unnormed,
                 'obs_ego': obs_ego,  # shape: obs len, 1
@@ -334,11 +336,11 @@ class PIEDataset(Dataset):
                 'ctx_ijhw': torch.tensor([-1, -1, -1, -1]),
                 'sklt_ijhw': torch.tensor([-1, -1, -1, -1]),
                 }
-        if self.dataset_name == 'PIE':
-            sample['set_id_int'] = self.samples['obs_set_id_int'][idx]
+        # if self.dataset_name == 'PIE':
+        #     sample['set_id_int'] = self.samples['obs_set_id_int'][idx]
 
         if 'sklt' in self.modalities:
-            if self.sklt_format == 'coord':
+            if 'coord' in self.sklt_format:
                 pid = self.samples['obs_pid'][idx][0][0]
                 coords = []
                 ori_obs_img_paths = self.samples['obs_image_paths'][idx]
@@ -353,6 +355,9 @@ class PIEDataset(Dataset):
                 # (T, N, C) -> (C, T, N)
                 try:
                     obs_skeletons = torch.from_numpy(coords).float().permute(2, 0, 1)  # 2, T, 17
+                    if '0-1' in self.sklt_format:
+                        obs_skeletons[0] = obs_skeletons[0] / self.img_size[0]
+                        obs_skeletons[1] = obs_skeletons[1] / self.img_size[1]
                 except:
                     print('coords shape',coords.shape)
                     import pdb;pdb.set_trace()
@@ -472,8 +477,10 @@ class PIEDataset(Dataset):
 
         if 'ctx' in self.modalities:
             # print('-----------getting ctx-----------')
-            if self.ctx_format in ('mask_ped', 'local', 'ori_local', 'ori'):
+            if self.ctx_format in ('mask_ped', 'local', 'ori_local', 'ori', 
+                 'ped_graph'):
                 pid = self.samples['obs_pid'][idx][0][0]
+                setid, vidid, oid = pid.split('_')
                 ctx_imgs = []
                 ori_obs_img_paths = self.samples['obs_image_paths'][idx]
                 for path in ori_obs_img_paths:
@@ -481,7 +488,7 @@ class PIEDataset(Dataset):
                     img_path = os.path.join(self.ctx_path, pid, img_nm)
                     ctx_imgs.append(cv2.imread(img_path))
                 ctx_imgs = np.stack(ctx_imgs, axis=0)
-                ctx_imgs = torch.from_numpy(ctx_imgs).float().permute(3, 0, 1, 2)
+                ctx_imgs = torch.from_numpy(ctx_imgs).float().permute(3, 0, 1, 2)  # 3 t h w
                 # normalize img
                 if self.img_norm_mode != 'ori':
                     ctx_imgs = norm_imgs(ctx_imgs, 
@@ -489,16 +496,42 @@ class PIEDataset(Dataset):
                 # BGR -> RGB
                 if self.color_order == 'RGB':
                    ctx_imgs = torch.flip(ctx_imgs, dims=[0])
+                # load cropped seg
+                if self.ctx_format == 'ped_graph':
+                    if self.dataset_name == 'PIE':
+                        vid_dir = '/'.join([setid, vidid])
+                    else:
+                        vid_dir = vidid
+                    img_nm = ori_obs_img_paths[-1].split('/')[-1]
+                    all_c_seg = []
+                    for c in self.seg_cls:
+                        seg_path = os.path.join(self.root_path,
+                                                'cropped_seg',
+                                                c,
+                                                'ori_local/224w_by_224h',
+                                                vid_dir,
+                                                'ped',
+                                                oid,
+                                                img_nm.replace('png', 'pkl'))
+                        with open(seg_path, 'rb') as f:
+                            segmap = pickle.load(f)*1  # h w int
+                        all_c_seg.append(torch.from_numpy(segmap))
+                    all_c_seg = torch.stack(all_c_seg, dim=-1)  # h w n_cls
+                    all_c_seg = torch.argmax(all_c_seg, dim=-1, keepdim=True).permute(2, 0, 1)  # 1 h w
+                    ctx_imgs = torch.concat([ctx_imgs[:, -1], all_c_seg], dim=0)  # 4 h w
                 sample['obs_context'] = ctx_imgs  # shape [3, obs_len, H, W]
             elif self.ctx_format in \
-                ('seg_ori_local', 'seg_local', 
-                 'ped_graph', 'ped_graph_all'):
+                ('seg_ori_local', 'seg_local'):
                 # load imgs
                 ori_obs_img_paths = self.samples['obs_image_paths'][idx]
                 ctx_imgs = []
                 for path in ori_obs_img_paths:
                     ctx_imgs.append(cv2.imread(path))
-                assert ctx_imgs[0].shape == [1080, 1920, 3], ctx_imgs.shape
+                assert ctx_imgs[0].shape[0] == 1080 and ctx_imgs[0].shape[1] == 1920, ctx_imgs[0].shape
+                # except AttributeError:
+                #     import pdb
+                #     pdb.set_trace()
+                #     raise ValueError
                 ctx_imgs = np.stack(ctx_imgs, axis=0)  # THWC
                 # permute
                 ctx_imgs = torch.from_numpy(ctx_imgs).float().permute(3, 0, 1, 2)  # CTHW
@@ -519,9 +552,13 @@ class PIEDataset(Dataset):
                                             str(int(v_nm.replace('video_', ''))), \
                                                 i_nm.replace('png', 'pkl')
                         for c in self.seg_cls:
-                            seg_path = os.path.join(self.sam_seg_root, c, s_id, v_id, f_nm)
+                            seg_path = os.path.join(self.root_path, 
+                                                    c, 
+                                                    s_id, 
+                                                    v_id, 
+                                                    f_nm)
                             with open(seg_path, 'rb') as f:
-                                seg = pickle.load(seg_path)
+                                seg = pickle.load(f)
                             ctx_segs[c].append(torch.from_numpy(seg))
                 elif self.dataset_name == 'JAAD':
                     for pth in ori_obs_img_paths:
@@ -587,6 +624,56 @@ class PIEDataset(Dataset):
                 sample = self._augment(sample)
 
         return sample
+
+    def _add_augment(self, data):
+        '''
+        data: self.samples, dict of lists(num samples, ...)
+        transforms: torchvision.transforms
+        '''
+        if 'crop' in self.augment_mode:
+            if 'img' in self.modalities:
+                self.transforms['resized_crop']['img'] = \
+                    RandomResizedCrop(size=self.bbox_size, # (h, w)
+                                        scale=(0.75, 1), 
+                                        ratio=(self.bbox_size[1]/self.bbox_size[0], 
+                                                self.bbox_size[1]/self.bbox_size[0]))  # w / h
+            if 'ctx' in self.modalities:
+                self.transforms['resized_crop']['ctx'] = RandomResizedCrop(size=self.ctx_size, # (h, w)
+                                                                        scale=(0.75, 1), 
+                                                                        ratio=(self.ctx_size[1]/self.ctx_size[0], self.ctx_size[1]/self.ctx_size[0]))  # w / h
+            if 'sklt' in self.modalities and self.sklt_format == 'pseudo_heatmap':
+                self.transforms['resized_crop']['sklt'] = RandomResizedCrop(size=(48, 48), # (h, w)
+                                                                            scale=(0.75, 1), 
+                                                                            ratio=(1, 1))  # w / h
+        if 'hflip' in self.augment_mode:
+            if 'random' in self.augment_mode:
+                self.transforms['random'] = 1
+                self.transforms['balance'] = 0
+                self.transforms['hflip'] = RandomHorizontalFlip(p=0.5)
+            elif 'balance' in self.augment_mode:
+                print(f'Num samples before flip: {self.num_samples}')
+                self.transforms['random'] = 0
+                self.transforms['balance'] = 1
+
+                # init extra samples
+                h_flip_samples = {}
+                for k in data:
+                    h_flip_samples[k] = []
+
+                # duplicate samples
+                for i in range(len(data['obs_image_paths'])):
+                    if data['target'][i][0] == 1:
+                        for k in data:
+                            h_flip_samples[k].append(copy.deepcopy(data[k][i]))
+                h_flip_samples['hflip_flag'] = [True] * len(h_flip_samples['obs_image_paths'])
+                data['hflip_flag'] = np.array([False] * len(data['obs_image_paths']))
+                # concat
+                for k in data:
+                    data[k] = np.concatenate([data[k], np.array(h_flip_samples[k])], axis=0)
+
+            self.num_samples = len(data['obs_image_paths'])
+            print(f'Num samples after flip: {self.num_samples}')
+        return data
 
     def _augment(self, sample):
         # flip
@@ -668,7 +755,7 @@ class PIEDataset(Dataset):
                 new_tracks[-1].append(speed / 3.6)
         return new_tracks
     
-    def _calc_accel(self, p_tracks):
+    def _get_accel(self, p_tracks):
         '''
         Add acceleration to the keys of tracks.
         The lengths of all tracks will be substracted by 1.
@@ -854,10 +941,6 @@ class PIEDataset(Dataset):
                 pred_bbox_normed.extend([d[self._obs_len:] for d in normed_samples[k]])
 
         if self.seq_type == 'crossing':
-            # if self.subset == 'test':
-            #     for sample in obs_slices['activities']:
-            #         print(len(sample))
-            #     pdb.set_trace()
             obs_slices['activities'] = np.array(obs_slices['activities'])[:, -1]
             pred_slices['activities'] = np.array(pred_slices['activities'])[:, -1]
         else:
@@ -946,56 +1029,6 @@ class PIEDataset(Dataset):
             all_samples['target'] = obs_slices['intention_binary']
         # pdb.set_trace()
         return all_samples
-
-    def _add_augment(self, data):
-        '''
-        data: self.samples, dict of lists(num samples, ...)
-        transforms: torchvision.transforms
-        '''
-        if 'crop' in self.augment_mode:
-            if 'img' in self.modalities:
-                self.transforms['resized_crop']['img'] = \
-                    RandomResizedCrop(size=self.bbox_size, # (h, w)
-                                        scale=(0.75, 1), 
-                                        ratio=(self.bbox_size[1]/self.bbox_size[0], 
-                                                self.bbox_size[1]/self.bbox_size[0]))  # w / h
-            if 'ctx' in self.modalities:
-                self.transforms['resized_crop']['ctx'] = RandomResizedCrop(size=self.ctx_size, # (h, w)
-                                                                        scale=(0.75, 1), 
-                                                                        ratio=(self.ctx_size[1]/self.ctx_size[0], self.ctx_size[1]/self.ctx_size[0]))  # w / h
-            if 'sklt' in self.modalities and self.sklt_format == 'pseudo_heatmap':
-                self.transforms['resized_crop']['sklt'] = RandomResizedCrop(size=(48, 48), # (h, w)
-                                                                            scale=(0.75, 1), 
-                                                                            ratio=(1, 1))  # w / h
-        if 'hflip' in self.augment_mode:
-            if 'random' in self.augment_mode:
-                self.transforms['random'] = 1
-                self.transforms['balance'] = 0
-                self.transforms['hflip'] = RandomHorizontalFlip(p=0.5)
-            elif 'balance' in self.augment_mode:
-                print(f'Num samples before flip: {self.num_samples}')
-                self.transforms['random'] = 0
-                self.transforms['balance'] = 1
-
-                # init extra samples
-                h_flip_samples = {}
-                for k in data:
-                    h_flip_samples[k] = []
-
-                # duplicate samples
-                for i in range(len(data['obs_image_paths'])):
-                    if data['target'][i][0] == 1:
-                        for k in data:
-                            h_flip_samples[k].append(copy.deepcopy(data[k][i]))
-                h_flip_samples['hflip_flag'] = [True] * len(h_flip_samples['obs_image_paths'])
-                data['hflip_flag'] = np.array([False] * len(data['obs_image_paths']))
-                # concat
-                for k in data:
-                    data[k] = np.concatenate([data[k], np.array(h_flip_samples[k])], axis=0)
-
-            self.num_samples = len(data['obs_image_paths'])
-            print(f'Num samples after flip: {self.num_samples}')
-        return data
 
     def downsample_seq(self):
         new_samples = {}
@@ -1160,7 +1193,6 @@ class PIEDataset(Dataset):
             all_data[k] = np.array(all_data[k])[new_idxs]
         print('Num video after removing: ', len(all_data['image']))
         return all_data
-
 
 
     def balance(self, balance_label, all_samples, random_seed=42):

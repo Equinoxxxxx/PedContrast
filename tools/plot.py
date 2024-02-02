@@ -4,6 +4,7 @@ import torch
 import os
 import scipy
 import cv2
+cv2.setNumThreads(0)
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
@@ -59,6 +60,7 @@ def draw_curves2(path, val_lists, labels, colors=['r', 'b'], vis_every=1):
             idx = list(range(ratio-1, len(curlist), ratio))
             curlist = curlist[idx]
         assert len(curlist) == min_len, (len(curlist), min_len, val_lists)
+        
         plt.plot(curlist, color=colors[i], label=labels[i])
     plt.xlabel('epoch / '+str(vis_every))
     plt.legend()

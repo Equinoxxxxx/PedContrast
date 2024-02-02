@@ -1,0 +1,6 @@
+[submodule "simple_HRNet"]
+	path = simple_HRNet
+	url = git@github.com:stefanopini/simple-HRNet.git
+[submodule "Grounded-Segment-Anything"]
+	path = Grounded-Segment-Anything
+	url = https://github.com/IDEA-Research/Grounded-Segment-Anything.git

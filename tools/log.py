@@ -6,7 +6,7 @@ def create_logger(log_filename, display=True):
     def logger(text):
         if display:
             print(text)
-        f.write(text + '\n')
+        f.write(str(text) + '\n')
         counter[0] += 1
         if counter[0] % 10 == 0:
             f.flush()

@@ -4,7 +4,6 @@ from ..data.nusc_split import TRAIN_SC, VAL_SC
 from ..data.coord_transform import nusc_3dbbox_to_2dbbox
 from ..visualize import draw_box, draw_boxes_on_img
 from ..utils import makedir
-from ..data.preprocess import crop_img, crop_ctx
 from ..data.normalize import img_mean_std, norm_imgs
 from .dataset_id import DATASET2ID, ID2DATASET
 from ..data.transforms import RandomHorizontalFlip, RandomResizedCrop, crop_local_ctx
@@ -16,6 +15,8 @@ import torch
 from tqdm import tqdm
 from pyquaternion import Quaternion
 import cv2
+cv2.setNumThreads(0)
+cv2.ocl.setUseOpenCL(False)
 import copy
 import pdb
 
@@ -26,36 +27,40 @@ class NuscDataset(torch.utils.data.Dataset):
     def __init__(self,
                  data_root=NUSC_ROOT,
                  subset='train',
-                 obs_len=2, pred_len=2, overlap_ratio=0.5, 
+                 obs_len=4, pred_len=4, overlap_ratio=0.5, 
+                 obs_fps=2,
                  recog_act=0,
                  tte=None,
-                 norm_traj=True,
+                 norm_traj=False,
                  min_h=72,
                  min_w=36,
                  min_vis_level=3,
                  sensor='CAM_FRONT',
-                 interval=0,
                  small_set=0,
                  augment_mode='random_hflip',
                  resize_mode='even_padded',
                  ctx_size=(224, 224),
                  color_order='BGR', 
                  img_norm_mode='torch',
-                 modalities='img_sklt_ctx_traj_ego',
+                 modalities=['img', 'sklt', 'ctx', 'traj', 'ego'],
                  img_format='',
-                 sklt_format='coords',
-                 ctx_format='ori_local',
+                 sklt_format='coord',
+                 ctx_format='ped_graph',
                  traj_format='ltrb',
                  ego_format='accel',
-                 seg_cls=['person', 'vehicles', 'roads', 'traffic_lights'],
+                 seg_cls=['person', 'vehicle', 'road', 'traffic_light'],
                  ):
         super().__init__()
         self.data_root = data_root
         self.subset = subset
         self.dataset_name = 'nuscenes'
+        self.fps = 2
         self.obs_len = obs_len
         self.pred_len = pred_len
-
+        self.seq_interval = self.fps // obs_fps - 1
+        # sequence length considering interval
+        self._obs_len = self.obs_len * (self.seq_interval + 1)
+        self._pred_len = self.pred_len * (self.seq_interval + 1)
         self.tte = tte
         self.overlap_ratio = overlap_ratio
         self.norm_traj = norm_traj
@@ -64,7 +69,6 @@ class NuscDataset(torch.utils.data.Dataset):
         self.min_w = min_w
         self.min_vis_level = min_vis_level
         self.sensor = sensor
-        self.interval = interval
         self.small_set = small_set
         self.augment_mode = augment_mode
         self.resize_mode = resize_mode
@@ -78,10 +82,7 @@ class NuscDataset(torch.utils.data.Dataset):
         self.traj_format = traj_format
         self.ego_format = ego_format
         self.seg_cls = seg_cls
-        # sequence length considering interval
-        self._obs_len = self.obs_len * (self.interval + 1)
-        self._pred_len = self.pred_len * (self.interval + 1)
-        self.ego_motion_key = 'ego_accel' if 'accel' in self.ego_format else 'ego_speed'
+        # self.ego_motion_key = 'ego_accel' if 'accel' in self.ego_format else 'ego_speed'
         if self.subset == 'train':
             self.sce_names = TRAIN_SC
         elif self.subset == 'val':
@@ -110,8 +111,11 @@ class NuscDataset(torch.utils.data.Dataset):
         self.p_tracks = self.get_obj_tracks(obj_type='ped')
         self.v_tracks = self.get_obj_tracks(obj_type='veh')
 
+
         # add the acceleration to the pedestrian tracks
-        self.p_tracks = self._get_accel(self.p_tracks)
+        if 'accel' in self.ego_format:
+            self.p_tracks = self._get_accel(self.p_tracks)
+
 
         # get cid to img name to obj id dict
         if not os.path.exists(self.imgnm_to_objid_path):
@@ -129,6 +133,12 @@ class NuscDataset(torch.utils.data.Dataset):
         # get num samples
         self.num_samples = len(self.samples['obs']['sam_id'])
 
+        # apply interval
+        if self.seq_interval > 0:
+            self.downsample_seq()
+
+        # add augmentation transforms
+        self._add_augment(self.samples)
         # small set
         if small_set > 0:
             small_set_size = int(self.num_samples * small_set)
@@ -189,7 +199,7 @@ class NuscDataset(torch.utils.data.Dataset):
                                         self.resize_mode,
                                         '224w_by_224h',
                                         'ped',
-                                        str(self.samples['obs']['sce_id'][idx][0]),
+                                        str(self.samples['obs']['ins_id'][idx][0]),
                                         str(sam_id)+'.png'
                                         )
                 imgs.append(cv2.imread(img_path))
@@ -205,33 +215,44 @@ class NuscDataset(torch.utils.data.Dataset):
             sample['ped_imgs'] = ped_imgs
         if 'sklt' in self.modalities:
             sklts = []
+            interm_dir = 'even_padded/48w_by_48h' \
+                if self.sklt_format == 'pseudo_heatmap' else 'even_padded/288w_by_384h'
             for sam_id in self.samples['obs']['sam_id'][idx]:
                 sklt_path = os.path.join(self.extra_root,
-                                        'sk_'+self.sklt_format+'s',
-                                        str(self.samples['obs']['sce_id'][idx][0]),
+                                        'sk_'+self.sklt_format.replace('0-1', '')+'s',
+                                        interm_dir,
+                                        str(self.samples['obs']['ins_id'][idx][0]),
                                         str(sam_id)+'.pkl'
                                         )
                 with open(sklt_path, 'rb') as f:
                     heatmap = pickle.load(f)
                 sklts.append(heatmap)
             sklts = np.stack(sklts, axis=0)  # T, ...
-            if self.sklt_format == 'coord':
-                obs_skeletons = torch.from_numpy(sklts).float().permute(2, 0, 1)  # shape: (2, T, nj)
+            if 'coord' in self.sklt_format:
+                obs_skeletons = torch.from_numpy(sklts).float().permute(2, 0, 1)[:2]  # shape: (2, T, nj)
+                if '0-1' in self.sklt_format:
+                    obs_skeletons[0] = obs_skeletons[0] / self.img_size[0]
+                    obs_skeletons[1] = obs_skeletons[1] / self.img_size[1]
             elif self.sklt_format == 'pseudo_heatmap':
                 # T C H W -> C T H W
                 obs_skeletons = torch.from_numpy(sklts).float().permute(1, 0, 2, 3)  # shape: (17, seq_len, 48, 48)
             sample['obs_skeletons'] = obs_skeletons
         if 'ctx' in self.modalities:
-            if self.ctx_format in ('local', 'ori_local', 'mask_ped', 'ori'):
+            if self.ctx_format in ('local', 'ori_local', 'mask_ped', 'ori',
+                                   'ped_graph'):
+                if self.ctx_format == 'ped_graph':
+                    ctx_format_dir = 'ori_local'
+                else:
+                    ctx_format_dir = self.ctx_format
                 ctx_imgs = []
                 for sam_id in self.samples['obs']['sam_id'][idx]:
                     img_path = os.path.join(self.extra_root,
                                         'context',
                                         self.sensor,
-                                        self.ctx_format,
+                                        ctx_format_dir,
                                         '224w_by_224h',
                                         'ped',
-                                        str(self.samples['obs']['sce_id'][idx][0]),
+                                        str(self.samples['obs']['ins_id'][idx][0]),
                                         str(sam_id)+'.png'
                                         )
                     ctx_imgs.append(cv2.imread(img_path))
@@ -246,10 +267,28 @@ class NuscDataset(torch.utils.data.Dataset):
                 # RGB -> BGR
                 if self.color_order == 'RGB':
                     ctx_imgs = torch.flip(ctx_imgs, dims=[0])
+                if self.ctx_format == 'ped_graph':
+                    all_c_seg = []
+                    ins_id = int(float(self.samples['obs']['ins_id'][idx][0]))
+                    sam_id = self.samples['obs']['sam_id'][idx][-1]
+                    for c in self.seg_cls:
+                        seg_path = os.path.join(self.extra_root,
+                                                'cropped_seg',
+                                                self.sensor,
+                                                c,
+                                                'ori_local/224w_by_224h/',
+                                                'ped',
+                                                str(ins_id),
+                                                str(sam_id)+'.pkl')
+                        with open(seg_path, 'rb') as f:
+                            segmap = pickle.load(f)*1  # h w int
+                        all_c_seg.append(torch.from_numpy(segmap))
+                    all_c_seg = torch.stack(all_c_seg, dim=-1)  # h w n_cls
+                    all_c_seg = torch.argmax(all_c_seg, dim=-1, keepdim=True).permute(2, 0, 1)  # 1 h w
+                    ctx_imgs = torch.concat([ctx_imgs[:, -1], all_c_seg], dim=0)  # 4 h w
                 sample['obs_context'] = ctx_imgs  # shape [3, obs_len, H, W]
             elif self.ctx_format in \
-                ('seg_ori_local', 'seg_local', 
-                 'ped_graph', 'ped_graph_all'):
+                ('seg_ori_local', 'seg_local'):
                 ctx_imgs = []
                 for sam_id in self.samples['obs']['sam_id'][idx]:
                     img_path = os.path.join(self.extra_root,
@@ -258,7 +297,7 @@ class NuscDataset(torch.utils.data.Dataset):
                                         'ori_local',
                                         '224w_by_224h',
                                         'ped',
-                                        str(self.samples['obs']['sce_id'][idx][0]),
+                                        str(self.samples['obs']['ins_id'][idx][0]),
                                         str(sam_id)+'.png'
                                         )
                     ctx_imgs.append(cv2.imread(img_path))
@@ -280,13 +319,11 @@ class NuscDataset(torch.utils.data.Dataset):
                             'seg_sam',
                             self.sensor,
                             c,
-                            sam_id+'.pkl'
+                            str(sam_id)+'.pkl'
                         )
                         with open(seg_path, 'rb') as f:
                             seg = pickle.load(f)
                         ctx_segs[c].append(torch.from_numpy(seg))
-                for c in self.seg_cls:
-                    ctx_segs[c] = torch.stack(ctx_segs[c], dim=0)  # THW
                 for c in self.seg_cls:
                     ctx_segs[c] = torch.stack(ctx_segs[c], dim=0)  # THW
                 # crop seg
@@ -313,6 +350,36 @@ class NuscDataset(torch.utils.data.Dataset):
         if self.augment_mode != 'none':
             if self.transforms['random']:
                 sample = self._random_augment(sample)
+        
+        return sample
+
+    def _add_augment(self, data):
+        '''
+        data: self.samples, dict of lists(num samples, ...)
+        transforms: torchvision.transforms
+        '''
+        if 'crop' in self.augment_mode:
+            if 'img' in self.modalities:
+                self.transforms['resized_crop']['img'] = \
+                    RandomResizedCrop(size=self.crop_size, # (h, w)
+                                    scale=(0.75, 1), 
+                                    ratio=(1., 1.))  # w / h
+            if 'ctx' in self.modalities:
+                self.transforms['resized_crop']['ctx'] = \
+                    RandomResizedCrop(size=self.ctx_size, # (h, w)
+                                      scale=(0.75, 1), 
+                                      ratio=(self.ctx_size[1]/self.ctx_size[0], 
+                                             self.ctx_size[1]/self.ctx_size[0]))  # w / h
+            if 'sklt' in self.modalities and self.sklt_format == 'pseudo_heatmap':
+                self.transforms['resized_crop']['sklt'] = \
+                    RandomResizedCrop(size=(48, 48), # (h, w)
+                                        scale=(0.75, 1), 
+                                        ratio=(1, 1))  # w / h
+        if 'hflip' in self.augment_mode:
+            if 'random' in self.augment_mode:
+                self.transforms['random'] = 1
+                self.transforms['balance'] = 0
+                self.transforms['hflip'] = RandomHorizontalFlip(p=0.5)
 
     def _random_augment(self, sample):
         # flip
@@ -338,7 +405,7 @@ class NuscDataset(torch.utils.data.Dataset):
                 else:
                     sample['obs_bboxes'][:, 0], sample['obs_bboxes'][:, 2] =\
                          2704 - sample['obs_bboxes'][:, 2], 2704 - sample['obs_bboxes'][:, 0]
-            if 'ego' in self.modalities and self.transforms['hflip'].flag:
+            if 'ego' in self.modalities and self.transforms['hflip'].flag and 'ang' in self.ego_format:
                 sample['obs_ego'][:, -1] = -sample['obs_ego'][:, -1]
         return sample
     
@@ -407,7 +474,6 @@ class NuscDataset(torch.utils.data.Dataset):
                 # skip too short track
                 if len(seq) < min_track_len:
                     continue
-                
                 processing = False
                 # discard the last frame for each track to calc speed
                 for i in range(len(seq)-1):
@@ -464,6 +530,7 @@ class NuscDataset(torch.utils.data.Dataset):
         return obj_tracks    
     
     def _get_accel(self, p_tracks):
+        print('Getting ego acceleration')
         new_tracks = {'sce_id': [],
                     'ins_id': [],
                     'sam_id': [],
@@ -499,7 +566,6 @@ class NuscDataset(torch.utils.data.Dataset):
             for i in range(len(new_tracks[k])):
                 assert len(new_tracks[k][i]) == len(new_tracks['ego_accel'][i]), \
                     (len(new_tracks[k][i]), len(new_tracks['ego_accel'][i]))
-        
         return new_tracks
 
     def calc_ego_velocity(self, cur_anntk, next_anntk):
@@ -569,7 +635,7 @@ class NuscDataset(torch.utils.data.Dataset):
         return imgnm_to_oid_to_info
 
     def tracks_to_samples(self, tracks):
-        seq_len = self.obs_len + self.pred_len
+        seq_len = self._obs_len + self._pred_len
         overlap_s = self._obs_len if self.overlap_ratio == 0 \
             else int((1 - self.overlap_ratio) * self._obs_len)
         overlap_s = 1 if overlap_s < 1 else overlap_s
@@ -610,7 +676,8 @@ class NuscDataset(torch.utils.data.Dataset):
         samples['bbox_3d_normed'] = bboxes_3d_norm
 
         # choose ego motion quantity
-        samples['ego_motion'] = samples[self.ego_motion_key]
+        samples['ego_motion'] = copy.deepcopy(samples['ego_accel']) \
+            if 'accel' in self.ego_format else copy.deepcopy(samples['ego_speed'])
         
         # split obs and pred
         print('---------------Split obs and pred---------------')
@@ -629,12 +696,41 @@ class NuscDataset(torch.utils.data.Dataset):
 
         return all_samples
 
+    def downsample_seq(self):
+        for k in self.samples['obs']:
+            if len(self.samples['obs'][k][0]) == self._obs_len:
+                new_k = []
+                for s in range(len(self.samples['obs'][k])):
+                    ori_seq = self.samples['obs'][k][s]
+                    new_seq = []
+                    for i in range(0, self._obs_len, self.seq_interval+1):
+                        new_seq.append(ori_seq[i])
+                    new_k.append(new_seq)
+                    assert len(new_k[s]) == self.obs_len, (k, len(new_k), self.obs_len)
+                new_k = np.array(new_k)
+                self.samples['obs'][k] = new_k
+        for k in self.samples['pred']:
+            if len(self.samples['pred'][k][0]) == self._pred_len:
+                new_k = []
+                for s in range(len(self.samples['pred'][k])):
+                    ori_seq = self.samples['pred'][k][s]
+                    new_seq = []
+                    for i in range(0, self._pred_len, self.seq_interval+1):
+                        new_seq.append(ori_seq[i])
+                    new_k.append(new_seq)
+                    assert len(new_k[s]) == self.pred_len, (k, len(new_k), self.pred_len)
+                new_k = np.array(new_k)
+                self.samples['pred'][k] = new_k
+    
     def get_neighbors(self, samids):
         
         pass
 
 
 def save_scene_token_dict():
+    '''
+    scene id to token/token to id dict
+    '''
     scene_id_to_token = {}
     token_to_scene_id = {}
     nusc = NuScenes(version='v1.0-trainval', dataroot=NUSC_ROOT, verbose=True)
@@ -650,6 +746,9 @@ def save_scene_token_dict():
         pickle.dump(token_to_scene_id, f)
 
 def save_sample_token_dict():
+    '''
+    sample id to token/token to id dict
+    '''
     sample_id_to_token = {}
     token_to_sample_id = {}
     nusc = NuScenes(version='v1.0-trainval', dataroot=NUSC_ROOT, verbose=True)
@@ -665,6 +764,9 @@ def save_sample_token_dict():
         pickle.dump(token_to_sample_id, f)
 
 def save_instance_token_dict():
+    '''
+    instance id to token/token to id dict
+    '''
     instance_id_to_token = {}
     token_to_instance_id = {}
     nusc = NuScenes(version='v1.0-trainval', dataroot=NUSC_ROOT, verbose=True)
@@ -818,79 +920,63 @@ def check_3d_to_2d():
         img = draw_box(img, box2d)
         cv2.imwrite(os.path.join(res_path, '2dbbox'+str(i)+'.png'), img)
 
-def save_cropped_imgs(obj_type='ped', sensor='CAM_FRONT', modality='img', resize_mode='even_padded', target_size=(224, 224)):
-    print(f'{obj_type}, {sensor}, {modality}, {resize_mode}')
-    nusc = NuScenes(version='v1.0-trainval', dataroot=NUSC_ROOT, verbose=True)
-    # f = open('/home/y_feng/workspace6/datasets/nusc/extra/token_id/trainval_scene_id_to_token.pkl', 'rb')
-    # scene_id_to_token = pickle.load(f)
-    # f.close()
-    # f = open('/home/y_feng/workspace6/datasets/nusc/extra/token_id/trainval_token_to_scene_id.pkl', 'rb')
-    # token_to_scene_id = pickle.load(f)
-    # f.close()
-    # f = open('/home/y_feng/workspace6/datasets/nusc/extra/token_id/trainval_sample_id_to_token.pkl', 'rb')
-    # sample_id_to_token = pickle.load(f)
-    # f.close()
-    f = open('/home/y_feng/workspace6/datasets/nusc/extra/token_id/trainval_token_to_sample_id.pkl', 'rb')
-    token_to_sample_id = pickle.load(f)
-    f.close()
-    # f = open('/home/y_feng/workspace6/datasets/nusc/extra/token_id/trainval_instance_id_to_token.pkl', 'rb')
-    # instance_id_to_token = pickle.load(f)
-    # f.close()
-    f = open('/home/y_feng/workspace6/datasets/nusc/extra/token_id/trainval_token_to_instance_id.pkl', 'rb')
-    token_to_instance_id = pickle.load(f)
-    f.close()
-    # f = open('/home/y_feng/workspace6/datasets/nusc/extra/token_id/trainval_ins_to_ann_to_id.pkl', 'rb')
-    # instk_to_anntk_to_id = pickle.load(f)
-    # f.close()
-    # f = open('/home/y_feng/workspace6/datasets/nusc/extra/token_id/trainval_ins_to_id_to_ann.pkl', 'rb')
-    # instk_to_id_to_anntk = pickle.load(f)
-    # f.close()
+# def save_cropped_imgs(obj_type='ped', sensor='CAM_FRONT', modality='img', resize_mode='even_padded', target_size=(224, 224)):
+#     print(f'{obj_type}, {sensor}, {modality}, {resize_mode}')
+#     nusc = NuScenes(version='v1.0-trainval', dataroot=NUSC_ROOT, verbose=True)
 
-    f = open(os.path.join('/home/y_feng/workspace6/datasets/nusc/extra', '_'.join(['anns_train', obj_type, sensor])+'.pkl'), 'rb')
-    instk_to_anntks = pickle.load(f)
-    f.close()
-    f = open(os.path.join('/home/y_feng/workspace6/datasets/nusc/extra', '_'.join(['anns_val', obj_type, sensor])+'.pkl'), 'rb')
-    val_instk_to_anntks = pickle.load(f)
-    f.close()
-    instk_to_anntks.update(val_instk_to_anntks)
+#     f = open('/home/y_feng/workspace6/datasets/nusc/extra/token_id/trainval_token_to_sample_id.pkl', 'rb')
+#     token_to_sample_id = pickle.load(f)
+#     f.close()
 
-    if modality == 'img':
-        root = '/home/y_feng/workspace6/datasets/nusc/extra/cropped_images'
-        root = os.path.join(root, sensor, resize_mode, str(target_size[0])+'w_by_'+str(target_size[1])+'h', obj_type)
-        makedir(root)
-    elif modality == 'ctx':
-        root = '/home/y_feng/workspace6/datasets/nusc/extra/context'
-        root = os.path.join(root, sensor, resize_mode, str(target_size[0])+'w_by_'+str(target_size[1])+'h', obj_type)
-        makedir(root)
+#     f = open('/home/y_feng/workspace6/datasets/nusc/extra/token_id/trainval_token_to_instance_id.pkl', 'rb')
+#     token_to_instance_id = pickle.load(f)
+#     f.close()
 
-    for instk in tqdm(instk_to_anntks):
-        insid = token_to_instance_id[instk]
-        ins_path = os.path.join(root, insid)
-        makedir(ins_path)
-        anntk_seqs = instk_to_anntks[instk]
-        seq_all = []
-        for seq in anntk_seqs:
-            seq_all += seq
-        for anntk in seq_all:
-            bbox = nusc_3dbbox_to_2dbbox(nusc, anntk)[0]  # ltrb
-            l, t, r, b = bbox
-            if r-l<2 or b-t<2:
-                continue
-            ann = nusc.get('sample_annotation', anntk)
-            samtk = nusc.get('sample', ann['sample_token'])['token']
-            sam = nusc.get('sample', samtk)
-            samid = token_to_sample_id[samtk]
-            sen_data = nusc.get('sample_data', sam['data'][sensor])
-            img_path = os.path.join(NUSC_ROOT, sen_data['filename'])
-            img = cv2.imread(img_path)
-            if modality == 'img':
-                cropped_img = crop_img(img, bbox, resize_mode, target_size)
-            elif modality == 'ctx':
-                cropped_img = crop_ctx(img, bbox, resize_mode, target_size)
-            if cropped_img is None:
-                continue
-            save_path = os.path.join(ins_path, samid+'.png')
-            cv2.imwrite(save_path, cropped_img)
+#     f = open(os.path.join('/home/y_feng/workspace6/datasets/nusc/extra', '_'.join(['anns_train', obj_type, sensor])+'.pkl'), 'rb')
+#     instk_to_anntks = pickle.load(f)
+#     f.close()
+#     f = open(os.path.join('/home/y_feng/workspace6/datasets/nusc/extra', '_'.join(['anns_val', obj_type, sensor])+'.pkl'), 'rb')
+#     val_instk_to_anntks = pickle.load(f)
+#     f.close()
+#     instk_to_anntks.update(val_instk_to_anntks)
+
+#     if modality == 'img':
+#         root = '/home/y_feng/workspace6/datasets/nusc/extra/cropped_images'
+#         root = os.path.join(root, sensor, resize_mode, str(target_size[0])+'w_by_'+str(target_size[1])+'h', obj_type)
+#         makedir(root)
+#     elif modality == 'ctx':
+#         root = '/home/y_feng/workspace6/datasets/nusc/extra/context'
+#         root = os.path.join(root, sensor, resize_mode, str(target_size[0])+'w_by_'+str(target_size[1])+'h', obj_type)
+#         makedir(root)
+
+#     for instk in tqdm(instk_to_anntks):
+#         insid = token_to_instance_id[instk]
+#         ins_path = os.path.join(root, insid)
+#         makedir(ins_path)
+#         anntk_seqs = instk_to_anntks[instk]
+#         seq_all = []
+#         for seq in anntk_seqs:
+#             seq_all += seq
+#         for anntk in seq_all:
+#             bbox = nusc_3dbbox_to_2dbbox(nusc, anntk)[0]  # ltrb
+#             l, t, r, b = bbox
+#             if r-l<2 or b-t<2:
+#                 continue
+#             ann = nusc.get('sample_annotation', anntk)
+#             samtk = nusc.get('sample', ann['sample_token'])['token']
+#             sam = nusc.get('sample', samtk)
+#             samid = token_to_sample_id[samtk]
+#             sen_data = nusc.get('sample_data', sam['data'][sensor])
+#             img_path = os.path.join(NUSC_ROOT, sen_data['filename'])
+#             img = cv2.imread(img_path)
+#             if modality == 'img':
+#                 cropped_img = crop_img(img, bbox, resize_mode, target_size)
+#             elif modality == 'ctx':
+#                 cropped_img = crop_ctx(img, bbox, resize_mode, target_size)
+#             if cropped_img is None:
+#                 continue
+#             save_path = os.path.join(ins_path, samid+'.png')
+#             cv2.imwrite(save_path, cropped_img)
 
 
 if __name__ == '__main__':

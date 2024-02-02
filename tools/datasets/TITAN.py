@@ -1,6 +1,6 @@
 import cv2
-from audioop import reverse
-from hashlib import new
+cv2.setNumThreads(0)
+cv2.ocl.setUseOpenCL(False)
 import pickle
 from re import T
 from turtle import resizemode
@@ -9,8 +9,6 @@ from torch.utils.data import Dataset, DataLoader
 import torch.nn.functional as F
 import numpy as np
 
-# cv2.setNumThreads(0)
-# cv2.ocl.setUseOpenCL(False)
 import time
 import copy
 import os
@@ -26,6 +24,7 @@ from ..data.normalize import img_mean_std, norm_imgs
 from ..data.transforms import RandomHorizontalFlip, RandomResizedCrop, crop_local_ctx
 from torchvision.transforms import functional as TVF
 from .dataset_id import DATASET2ID, ID2DATASET
+from config import dataset_root
 
 
 ATOM_ACTION_LABEL_ORI = {  # 3 no samples; 7, 8 no test samples
@@ -220,55 +219,66 @@ LABEL_2_IMBALANCE_CLS = {
     'transporting': [0, 1, 2],
 }
 
+KEY_2_N_CLS = {
+    'cross': 2,
+    'atomic': NUM_CLS_ATOMIC,
+    'simple': NUM_CLS_SIMPLE,
+    'complex': NUM_CLS_COMPLEX,
+    'communicative': NUM_CLS_COMMUNICATIVE,
+    'transporting': NUM_CLS_TRANSPORTING,
+    'age': NUM_CLS_AGE,
+}
+
 class TITAN_dataset(Dataset):
     def __init__(self,
                  sub_set='default_train',
                  track_save_path='',
-                 norm_traj=True,
+                 norm_traj=False,
                  neighbor_mode='last_frame',
-                 obs_len=6, pred_len=1, overlap_ratio=0.5, recog_act=0,
-                 obs_interval=0,
+                 obs_len=4, pred_len=4, overlap_ratio=0.5, recog_act=0,
+                 obs_fps=2,
                  color_order='BGR', img_norm_mode='torch',
                  required_labels=['atomic_actions', 'simple_context'], 
                  multi_label_cross=0, 
+                 use_cross=1,
                  use_atomic=0, use_complex=0, use_communicative=0, 
                  use_transporting=0, use_age=0,
                  loss_weight='sklearn',
                  tte=None,
                  small_set=0,
-                 resize_mode='even_padded', img_size=(224, 224),
-                 modalities='',
+                 resize_mode='even_padded', crop_size=(224, 224),
+                 modalities=['img', 'sklt', 'ctx', 'traj', 'ego'],
                  img_format='',
                  ctx_format='local', ctx_size=(224, 224),
-                 sklt_format='pseudo_heatmap',
+                 sklt_format='coord',
                  traj_format='ltrb',
-                 ego_format='',
-                 augment_mode='none',
-                 seg_cls=['person', 'vehicles', 'roads', 'traffic_lights'],
+                 ego_format='accel',
+                 augment_mode='random_hflip',
+                 seg_cls=['person', 'vehicle', 'road', 'traffic_light'],
                  pop_occl_track=1,
                  ) -> None:
         super(Dataset, self).__init__()
+        self.img_size = (1520, 2704)
+        self.fps = 10
         self.dataset_name = 'TITAN'
         self.sub_set = sub_set
         self.norm_traj = norm_traj
         self.obs_len = obs_len
         self.pred_len = pred_len
-        self.obs_interval = obs_interval
+        self.seq_interval = self.fps // obs_fps - 1
         self.overlap_ratio = overlap_ratio
         self.recog_act = recog_act
         self.obs_or_pred = 'obs' if self.recog_act else 'pred'
         self.color_order = color_order
         self.img_norm_mode = img_norm_mode
-
         self.img_mean, self.img_std = img_mean_std(self.img_norm_mode)
-
         # sequence length considering interval
-        self._obs_len = self.obs_len * (self.obs_interval + 1)
-        self._pred_len = self.pred_len * (self.obs_interval + 1)
+        self._obs_len = self.obs_len * (self.seq_interval + 1)
+        self._pred_len = self.pred_len * (self.seq_interval + 1)
 
         self.modalities = modalities
         self.resize_mode = resize_mode
-        self.img_size = img_size
+        self.crop_size = crop_size
         self.img_format = img_format
         self.ctx_format = ctx_format
         self.ctx_size = ctx_size
@@ -278,6 +288,7 @@ class TITAN_dataset(Dataset):
         self.track_save_path = track_save_path
         self.required_labels = required_labels
         self.multi_label_cross = multi_label_cross
+        self.use_cross = use_cross
         self.use_atomic = use_atomic
         self.use_complex = use_complex
         self.use_communicative = use_communicative
@@ -302,11 +313,15 @@ class TITAN_dataset(Dataset):
         self.cropped_img_root = os.path.join(self.extra_data_root,
                                              'cropped_images', 
                                              self.resize_mode, 
-                                             str(img_size[1])+'w_by_'\
-                                                +str(img_size[0])+'h')
+                                             str(crop_size[1])+'w_by_'\
+                                                +str(crop_size[0])+'h')
+        if self.ctx_format == 'ped_graph':
+            ctx_format_dir = 'ori_local'
+        else:
+            ctx_format_dir = self.ctx_format
         self.ctx_root = os.path.join(self.extra_data_root, 
                                      'context', 
-                                     self.ctx_format, 
+                                     ctx_format_dir, 
                                      str(ctx_size[1])+'w_by_'\
                                         +str(ctx_size[0])+'h')
         self.ped_ori_local_root = '/home/y_feng/workspace6/datasets/TITAN/TITAN_extra/context/ori_local/224w_by_224h/ped'
@@ -391,7 +406,7 @@ class TITAN_dataset(Dataset):
         self.num_samples = len(self.samples['obs']['img_nm'])
 
         # apply interval
-        if self.obs_interval > 0:
+        if self.seq_interval > 0:
             self.downsample_seq()
             
         # small set
@@ -432,8 +447,8 @@ class TITAN_dataset(Dataset):
         self.num_samples_cls = [self.n_nc, self.n_c]
         self.class_weights = {}
         if self.multi_label_cross:
-            labels = np.squeeze(self.samples[self.obs_or_pred]\
-                                ['simple_context'])
+            labels = np.array(self.samples[self.obs_or_pred]\
+                                ['simple_context'])[:, -1]
             # print(labels.shape, labels)
             self.num_samples_cls = []
             for i in range(13):
@@ -446,7 +461,7 @@ class TITAN_dataset(Dataset):
                                                   'sklearn')
 
         if self.use_atomic:
-            labels = np.squeeze(self.samples['pred']['atomic_actions'])
+            labels = np.array(self.samples['pred']['atomic_actions'])[:, -1]
             self.num_samples_atomic = []
             for i in range(NUM_CLS_ATOMIC):
                 n_cur_cls = sum(labels == i)
@@ -457,20 +472,20 @@ class TITAN_dataset(Dataset):
             self.class_weights['atomic'] = cls_weights(self.num_samples_atomic, 
                                                        'sklearn')
         if self.use_complex:
-            labels = np.squeeze(self.samples['pred']['complex_context'])
+            labels = np.array(self.samples['pred']['complex_context'])[:, -1]
             self.num_samples_complex = []
             for i in range(NUM_CLS_COMPLEX):
                 n_cur_cls = sum(labels == i)
                 self.num_samples_complex.append(n_cur_cls)
             assert sum(self.num_samples_complex) == self.num_samples, \
-                sum(self.num_samples_complex)
+                (sum(self.num_samples_complex), self.num_samples)
             print('complex label distr', 
                   self.num_samples, 
                   self.num_samples_complex)
             self.class_weights['complex'] = \
                 cls_weights(self.num_samples_complex, 'sklearn')
         if self.use_communicative:
-            labels = np.squeeze(self.samples['pred']['communicative'])
+            labels = np.array(self.samples['pred']['communicative'])[:, -1]
             self.num_samples_communicative = []
             for i in range(NUM_CLS_COMMUNICATIVE):
                 n_cur_cls = sum(labels == i)
@@ -481,7 +496,7 @@ class TITAN_dataset(Dataset):
             self.class_weights['communicative'] = \
                 cls_weights(self.num_samples_communicative, 'sklearn')
         if self.use_transporting:
-            labels = np.squeeze(self.samples['pred']['transporting'])
+            labels = np.array(self.samples['pred']['transporting'])[:, -1]
             self.num_samples_transporting = []
             for i in range(NUM_CLS_TRANSPORTING):
                 n_cur_cls = sum(labels == i)
@@ -492,7 +507,7 @@ class TITAN_dataset(Dataset):
             self.class_weights['transporting'] = \
                 cls_weights(self.num_samples_transporting, 'sklearn')
         if self.use_age:
-            labels = np.squeeze(self.samples['pred']['age'])
+            labels = np.array(self.samples['pred']['age'])[:, -1]
             self.num_samples_age = []
             for i in range(NUM_CLS_AGE):
                 n_cur_cls = sum(labels == i)
@@ -501,19 +516,19 @@ class TITAN_dataset(Dataset):
                 cls_weights(self.num_samples_age, 'sklearn')
         
         # apply interval
-        if self.obs_interval > 0:
-            self.donwsample_seq()
+        if self.seq_interval > 0:
+            self.downsample_seq()
             print('Applied interval')
-            print('cur input len', len(self.samples['obs_img_nm_int']))
+            print('cur input len', len(self.samples['obs']['img_nm_int']))
 
     def __len__(self):
         return self.num_samples
 
     def __getitem__(self, idx):
-        obs_bbox = torch.tensor(self.samples['obs']['bbox_normed'][idx]).float()
+        obs_bbox = torch.tensor(self.samples['obs']['bbox_normed'][idx]).float()  # T 4
         obs_bbox_unnormed = torch.tensor(self.samples['obs']['bbox'][idx]).float()
         pred_bbox = torch.tensor(self.samples['pred']['bbox_normed'][idx]).float()
-        obs_ego = torch.tensor(self.samples['obs']['ego_motion'][idx]).float()
+        obs_ego = torch.tensor(self.samples['obs']['ego_motion'][idx]).float()[:, 0]  # [accel, ang_vel] 0 for accel only
         clip_id_int = torch.tensor(int(self.samples['obs']['clip_id'][idx][0]))
         ped_id_int = torch.tensor(int(float(self.samples['obs']['obj_id'][idx][0])))
         img_nm_int = torch.tensor(self.samples['obs']['img_nm_int'][idx])
@@ -526,22 +541,23 @@ class TITAN_dataset(Dataset):
             obs_bbox[:, 3] /= 1520
         # act labels
         if self.multi_label_cross:
-            target = torch.tensor([self.samples[self.obs_or_pred]\
-                                        ['simple_context'][idx][-1]])  # int
+            target = torch.tensor(self.samples[self.obs_or_pred]\
+                                        ['simple_context'][idx][-1])  # int
         else:
-            target = torch.tensor([self.samples[self.obs_or_pred]\
-                                        ['crossing'][idx][-1]])  # int
-        simple_context = torch.tensor([self.samples[self.obs_or_pred]\
-                                       ['simple_context'][idx][-1]])
-        atomic_action = torch.tensor([self.samples[self.obs_or_pred]\
-                                      ['atomic_actions'][idx][-1]])
-        complex_context = torch.tensor([self.samples[self.obs_or_pred]\
-                                        ['complex_context'][idx][-1]])
-        communicative = torch.tensor([self.samples[self.obs_or_pred]\
-                                      ['communicative'][idx][-1]])
-        transporting = torch.tensor([self.samples[self.obs_or_pred]\
-                                     ['transporting'][idx][-1]])
-        age = torch.tensor(self.samples[self.obs_or_pred]['age'][idx])
+            target = torch.tensor(self.samples[self.obs_or_pred]\
+                                        ['crossing'][idx][-1])  # int
+        simple_context = torch.tensor(self.samples[self.obs_or_pred]\
+                                       ['simple_context'][idx][-1])
+        atomic_action = torch.tensor(self.samples[self.obs_or_pred]\
+                                      ['atomic_actions'][idx][-1])
+        complex_context = torch.tensor(self.samples[self.obs_or_pred]\
+                                        ['complex_context'][idx][-1])
+        communicative = torch.tensor(self.samples[self.obs_or_pred]\
+                                      ['communicative'][idx][-1])
+        transporting = torch.tensor(self.samples[self.obs_or_pred]\
+                                     ['transporting'][idx][-1])
+        age = torch.tensor(self.samples[self.obs_or_pred]\
+                           ['age'][idx][-1])
         sample = {'dataset_name': torch.tensor(DATASET2ID[self.dataset_name]),
                   'set_id_int': torch.tensor(-1),
                   'vid_id_int': clip_id_int,  # int
@@ -585,7 +601,8 @@ class TITAN_dataset(Dataset):
                 ped_imgs = torch.flip(ped_imgs, dims=[0])
             sample['ped_imgs'] = ped_imgs
         if 'ctx' in self.modalities:
-            if self.ctx_format in ('local', 'ori_local', 'mask_ped', 'ori'):
+            if self.ctx_format in ('local', 'ori_local', 'mask_ped', 'ori', 
+                                   'ped_graph'):
                 ctx_imgs = []
                 for img_nm in self.samples['obs']['img_nm'][idx]:
                     img_path = os.path.join(self.ctx_root, 
@@ -608,11 +625,30 @@ class TITAN_dataset(Dataset):
                 # RGB -> BGR
                 if self.color_order == 'RGB':
                     ctx_imgs = torch.flip(ctx_imgs, dims=[0])
+                # add segmentation channel
+                if self.ctx_format == 'ped_graph':
+                    all_c_seg = []
+                    img_nm = self.samples['obs']['img_nm'][idx][-1]
+                    vid_dir = self.samples['obs']['clip_id'][idx][0]
+                    oid = str(int(float(self.samples['obs']['obj_id'][idx][0])))
+                    for c in self.seg_cls:
+                        seg_path = os.path.join(self.extra_data_root,
+                                                'cropped_seg',
+                                                c,
+                                                'ori_local/224w_by_224h',
+                                                vid_dir,
+                                                'ped',
+                                                oid,
+                                                img_nm.replace('png', 'pkl'))
+                        with open(seg_path, 'rb') as f:
+                            segmap = pickle.load(f)*1  # h w int
+                        all_c_seg.append(torch.from_numpy(segmap))
+                    all_c_seg = torch.stack(all_c_seg, dim=-1)  # h w n_cls
+                    all_c_seg = torch.argmax(all_c_seg, dim=-1, keepdim=True).permute(2, 0, 1)  # 1 h w
+                    ctx_imgs = torch.concat([ctx_imgs[:, -1], all_c_seg], dim=0)  # 4 h w
                 sample['obs_context'] = ctx_imgs  # shape [3, obs_len, H, W]
-            
             elif self.ctx_format in \
-                ('seg_ori_local', 'seg_local', 
-                 'ped_graph', 'ped_graph_all'):
+                ('seg_ori_local', 'seg_local'):
                 # load imgs
                 ctx_imgs = []
                 for img_nm in self.samples['obs']['img_nm'][idx]:
@@ -660,7 +696,7 @@ class TITAN_dataset(Dataset):
                 all_seg = torch.stack(all_seg, dim=4)  # 1Thw n_cls
                 if self.ctx_format == 'ped_graph':
                     all_seg = torch.argmax(all_seg[0, -1], dim=-1, keepdim=True).permute(2, 0, 1)  # 1 h w
-                    sample['obs_context'] = torch.concat([ctx_imgs[:, -1], all_seg], dim=0)
+                    sample['obs_context'] = torch.concat([ctx_imgs[:, -1], all_seg], dim=0)  # 4 h w
                 else:
                     sample['obs_context'] = all_seg * torch.unsqueeze(ctx_imgs, dim=-1)  # 3Thw n_cls
                 
@@ -678,7 +714,7 @@ class TITAN_dataset(Dataset):
                 heatmaps = np.stack(heatmaps, axis=0)  # T C H W
                 # T C H W -> C T H W
                 obs_skeletons = torch.from_numpy(heatmaps).float().permute(1, 0, 2, 3)  # shape: (17, seq_len, 48, 48)
-            elif self.sklt_format == 'coord':
+            elif 'coord' in self.sklt_format:
                 cid = str(int(float(self.samples['obs']['clip_id'][idx][0])))
                 pid = str(int(float(self.samples['obs']['obj_id'][idx][0])))
                 coords = []
@@ -691,6 +727,9 @@ class TITAN_dataset(Dataset):
                 coords = np.stack(coords, axis=0)  # T, nj, 2
                 try:
                     obs_skeletons = torch.from_numpy(coords).float().permute(2, 0, 1)  # shape: (2, T, nj)
+                    if '0-1' in self.sklt_format:
+                        obs_skeletons[0] = obs_skeletons[0] / self.img_size[0]
+                        obs_skeletons[1] = obs_skeletons[1] / self.img_size[1]
                 except:
                     print('coords shape',coords.shape)
                     import pdb;pdb.set_trace()
@@ -708,6 +747,80 @@ class TITAN_dataset(Dataset):
                 sample = self._augment(sample)
 
         return sample
+
+    def _add_augment(self, data):
+        '''
+        data: self.samples, dict of lists(num samples, ...)
+        transforms: torchvision.transforms
+        '''
+        if 'crop' in self.augment_mode:
+            if 'img' in self.modalities:
+                self.transforms['resized_crop']['img'] = \
+                    RandomResizedCrop(size=self.crop_size, # (h, w)
+                                    scale=(0.75, 1), 
+                                    ratio=(1., 1.))  # w / h
+            if 'ctx' in self.modalities:
+                self.transforms['resized_crop']['ctx'] = \
+                    RandomResizedCrop(size=self.ctx_size, # (h, w)
+                                      scale=(0.75, 1), 
+                                      ratio=(self.ctx_size[1]/self.ctx_size[0], 
+                                             self.ctx_size[1]/self.ctx_size[0]))  # w / h
+            if 'sklt' in self.modalities and self.sklt_format == 'pseudo_heatmap':
+                self.transforms['resized_crop']['sklt'] = \
+                    RandomResizedCrop(size=(48, 48), # (h, w)
+                                        scale=(0.75, 1), 
+                                        ratio=(1, 1))  # w / h
+        if 'hflip' in self.augment_mode:
+            if 'random' in self.augment_mode:
+                self.transforms['random'] = 1
+                self.transforms['balance'] = 0
+                self.transforms['hflip'] = RandomHorizontalFlip(p=0.5)
+            elif 'balance' in self.augment_mode:
+                print(f'Num samples before flip: {self.num_samples}')
+                self.transforms['random'] = 0
+                self.transforms['balance'] = 1
+                imbalance_sets = []
+
+                # init extra samples
+                h_flip_samples = {
+                    'obs':{},
+                    'pred':{}
+                }
+                for k in data['obs']:
+                    h_flip_samples['obs'][k] = []
+                    h_flip_samples['pred'][k] = []
+
+                # keys to check
+                for k in KEY_2_LABEL:
+                    if k in self.augment_mode:
+                        imbalance_sets.append(KEY_2_LABEL[k])
+                # duplicate samples
+                for i in range(len(data['obs']['img_nm'])):
+                    for label in imbalance_sets:
+                        if data[self.obs_or_pred][label][i][-1] \
+                            in LABEL_2_IMBALANCE_CLS[label]:
+                            for k in data['obs']:
+                                h_flip_samples['obs'][k].append(
+                                    copy.deepcopy(data['obs'][k][i]))
+                                h_flip_samples['pred'][k].append(
+                                    copy.deepcopy(data['pred'][k][i]))
+                        break
+                h_flip_samples['obs']['hflip_flag'] = \
+                    [True for i in range(len(h_flip_samples['obs']['img_nm']))]
+                h_flip_samples['pred']['hflip_flag'] = \
+                    [True for i in range(len(h_flip_samples['pred']['img_nm']))]
+                data['obs']['hflip_flag'] = \
+                    [False for i in range(len(data['obs']['img_nm']))]
+                data['pred']['hflip_flag'] = \
+                    [False for i in range(len(data['pred']['img_nm']))]
+
+                # concat
+                for k in data['obs']:
+                    data['obs'][k].extend(h_flip_samples['obs'][k])
+                    data['pred'][k].extend(h_flip_samples['pred'][k])
+            self.num_samples = len(data['obs']['img_nm_int'])
+            print(f'Num samples after flip: {self.num_samples}')
+        return data
 
     def _augment(self, sample):
         # flip
@@ -768,7 +881,7 @@ class TITAN_dataset(Dataset):
                 else:
                     sample['obs_bboxes'][:, 0], sample['obs_bboxes'][:, 2] =\
                          2704 - sample['obs_bboxes'][:, 2], 2704 - sample['obs_bboxes'][:, 0]
-            if 'ego' in self.modalities and self.transforms['hflip'].flag:
+            if 'ego' in self.modalities and self.transforms['hflip'].flag and 'ang' in self.ego_format:
                 sample['obs_ego'][:, -1] = -sample['obs_ego'][:, -1]
             
         # resized crop
@@ -780,9 +893,9 @@ class TITAN_dataset(Dataset):
             self.transforms['resized_crop']['ctx'].randomize_parameters()
             sample['obs_context'], ijhw = self.transforms['resized_crop']['ctx'](sample['obs_context'])
             sample['ctx_ijhw'] = torch.tensor(ijhw)
-        if self.transforms['resized_crop']['sk'] is not None:
-            self.transforms['resized_crop']['sk'].randomize_parameters()
-            sample['obs_skeletons'], ijhw = self.transforms['resized_crop']['sk'](sample['obs_skeletons'])
+        if self.transforms['resized_crop']['sklt'] is not None:
+            self.transforms['resized_crop']['sklt'].randomize_parameters()
+            sample['obs_skeletons'], ijhw = self.transforms['resized_crop']['sklt'](sample['obs_skeletons'])
             sample['sklt_ijhw'] = torch.tensor(ijhw)
         return sample
 
@@ -807,80 +920,6 @@ class TITAN_dataset(Dataset):
             annos[cid] = self.str2ndarray(clip_obj_info)
 
         return annos, ids
-    
-    def _add_augment(self, data):
-        '''
-        data: self.samples, dict of lists(num samples, ...)
-        transforms: torchvision.transforms
-        '''
-        if 'crop' in self.augment_mode:
-            if 'img' in self.modalities:
-                self.transforms['resized_crop']['img'] = \
-                    RandomResizedCrop(size=self.img_size, # (h, w)
-                                    scale=(0.75, 1), 
-                                    ratio=(1., 1.))  # w / h
-            if 'ctx' in self.modalities:
-                self.transforms['resized_crop']['ctx'] = \
-                    RandomResizedCrop(size=self.ctx_size, # (h, w)
-                                      scale=(0.75, 1), 
-                                      ratio=(self.ctx_size[1]/self.ctx_size[0], 
-                                             self.ctx_size[1]/self.ctx_size[0]))  # w / h
-            if 'sklt' in self.modalities and self.sklt_format == 'pseudo_heatmap':
-                self.transforms['resized_crop']['sk'] = \
-                    RandomResizedCrop(size=(48, 48), # (h, w)
-                                        scale=(0.75, 1), 
-                                        ratio=(1, 1))  # w / h
-        if 'hflip' in self.augment_mode:
-            if 'random' in self.augment_mode:
-                self.transforms['random'] = 1
-                self.transforms['balance'] = 0
-                self.transforms['hflip'] = RandomHorizontalFlip(p=0.5)
-            elif 'balance' in self.augment_mode:
-                print(f'Num samples before flip: {self.num_samples}')
-                self.transforms['random'] = 0
-                self.transforms['balance'] = 1
-                imbalance_sets = []
-
-                # init extra samples
-                h_flip_samples = {
-                    'obs':{},
-                    'pred':{}
-                }
-                for k in data['obs']:
-                    h_flip_samples['obs'][k] = []
-                    h_flip_samples['pred'][k] = []
-
-                # keys to check
-                for k in KEY_2_LABEL:
-                    if k in self.augment_mode:
-                        imbalance_sets.append(KEY_2_LABEL[k])
-                # duplicate samples
-                for i in range(len(data['obs']['img_nm'])):
-                    for label in imbalance_sets:
-                        if data[self.obs_or_pred][label][i][-1] \
-                            in LABEL_2_IMBALANCE_CLS[label]:
-                            for k in data['obs']:
-                                h_flip_samples['obs'][k].append(
-                                    copy.deepcopy(data['obs'][k][i]))
-                                h_flip_samples['pred'][k].append(
-                                    copy.deepcopy(data['pred'][k][i]))
-                        break
-                h_flip_samples['obs']['hflip_flag'] = \
-                    [True for i in range(len(h_flip_samples['obs']['img_nm']))]
-                h_flip_samples['pred']['hflip_flag'] = \
-                    [True for i in range(len(h_flip_samples['pred']['img_nm']))]
-                data['obs']['hflip_flag'] = \
-                    [False for i in range(len(data['obs']['img_nm']))]
-                data['pred']['hflip_flag'] = \
-                    [False for i in range(len(data['pred']['img_nm']))]
-
-                # concat
-                for k in data['obs']:
-                    data['obs'][k].extend(h_flip_samples['obs'][k])
-                    data['pred'][k].extend(h_flip_samples['pred'][k])
-            self.num_samples = len(data['obs']['img_nm'])
-            print(f'Num samples after flip: {self.num_samples}')
-        return data
 
     def get_p_tracks(self, annos):
         p_tracks = {'clip_id': [],
@@ -899,7 +938,7 @@ class TITAN_dataset(Dataset):
         for cid in self.ids.keys():
             # load ego motion
             ego_v_path = os.path.join(self.ori_data_root, 'clip_'+cid, 'synced_sensors.csv')
-            ego_v_info = self.read_ego_csv(ego_v_path)  # dict {'img_nm': [info]}
+            ego_v_info = self.read_ego_csv(ego_v_path)  # dict {'img_nm': [accel, yaw]}
             clip_annos = annos[cid]
             for _, pid in self.ids[cid]['pid']:
                 # init new track
@@ -955,7 +994,7 @@ class TITAN_dataset(Dataset):
                     p_tracks['simple_context'][-1].append(SIMPLE_CONTEXTUAL_LABEL[line[13]])
                     p_tracks['transporting'][-1].append(TRANSPORTIVE_LABEL[line[14]])
                     p_tracks['age'][-1].append(AGE_LABEL[line[15]])
-                    ego_motion = ego_v_info[line[0].replace('.png', '')]
+                    ego_motion = ego_v_info[line[0].replace('.png', '')]  # 
                     p_tracks['ego_motion'][-1].append(list(map(float, ego_motion)))
         
         num_tracks = len(p_tracks['clip_id'])
@@ -1139,9 +1178,9 @@ class TITAN_dataset(Dataset):
         idxs: list (int,...)
         '''
         bi_labels = []
-        for s in labels:
+        for sample in labels:
             bi_labels.append([])
-            for t in s:
+            for t in sample:
                 if t in idxs:
                     bi_labels[-1].append(1)
                 else:
@@ -1171,7 +1210,7 @@ class TITAN_dataset(Dataset):
             reader = csv.reader(f)
             for line in reader:
                 img_nm = line[1].split('/')[-1].replace('.png', '')
-                res[img_nm] = [line[3], line[5]]
+                res[img_nm] = [line[3], line[5]]  # accel, angle vel
             
         return res
 
@@ -1182,7 +1221,7 @@ class TITAN_dataset(Dataset):
                 for s in range(len(self.samples['obs'][k])):
                     ori_seq = self.samples['obs'][k][s]
                     new_seq = []
-                    for i in range(0, self._obs_len, self.obs_interval+1):
+                    for i in range(0, self._obs_len, self.seq_interval+1):
                         new_seq.append(ori_seq[i])
                     new_k.append(new_seq)
                     assert len(new_k[s]) == self.obs_len, (k, len(new_k), self.obs_len)
@@ -1194,7 +1233,7 @@ class TITAN_dataset(Dataset):
                 for s in range(len(self.samples['pred'][k])):
                     ori_seq = self.samples['pred'][k][s]
                     new_seq = []
-                    for i in range(0, self._pred_len, self.obs_interval+1):
+                    for i in range(0, self._pred_len, self.seq_interval+1):
                         new_seq.append(ori_seq[i])
                     new_k.append(new_seq)
                     assert len(new_k[s]) == self.pred_len, (k, len(new_k), self.pred_len)

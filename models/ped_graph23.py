@@ -2,69 +2,142 @@ import math
 import torch
 from torch import nn
 import numpy as np
-
+from tools.datasets.TITAN import KEY_2_N_CLS
     
 
-class pedMondel(nn.Module):
+class PedGraph(nn.Module):
 
     def __init__(self, 
-                 frames, 
-                 vel=False, 
-                 seg=False, 
-                 h3d=True, 
+                 modalities=['sklt', 'ctx', 'ego'],
+                 act_sets=['cross'], 
+                 seg=True, 
+                 h3d=False, 
                  nodes=17, 
-                 n_clss=2,
-                 use_cross=1,
-                 use_atomic=0,
+                 proj_norm='bn',
+                 proj_actv='leakyrelu',
+                 pretrain=True,
+                 n_mlp=1,
+                 proj_dim=256,
                  ):
-        super(pedMondel, self).__init__()
-
+        super(PedGraph, self).__init__()
+        self.model_name = 'ped_graph'
+        self.modalities = modalities
         self.h3d = h3d # bool if true 3D human keypoints data is enable otherwise 2D is only used
-        self.frames = frames
-        self.vel = vel
         self.seg = seg
-        self.n_clss = n_clss
-        self.use_cross = use_cross
-        self.use_atomic = use_atomic
+        self.act_sets = act_sets
+        self.proj_norm = proj_norm
+        self.proj_actv = proj_actv
+        self.pretrain = pretrain
+        self.n_mlp = n_mlp
         self.ch = 3 if h3d else 2
         self.ch1, self.ch2 = 32, 64
-        i_ch = 4 if seg else 3
+        i_ch = 4 if self.seg else 3
+        self.proj_dim = proj_dim if proj_dim > 0 else self.ch2
 
+        # init contrast scale factor
+        self.logit_scale = nn.parameter.Parameter(
+            torch.ones([]) * np.log(1 / 0.07))
+        
         self.data_bn = nn.BatchNorm1d(self.ch * nodes)
         bn_init(self.data_bn, 1)
         self.drop = nn.Dropout(0.25)
         A = np.stack([np.eye(nodes)] * 3, axis=0)
         
-        if frames:
-            self.conv0 = nn.Sequential(
+        if 'ctx' in self.modalities:
+            self.ctx_encoder0 = nn.Sequential(
                 nn.Conv2d(i_ch, self.ch1, kernel_size=3, stride=1, padding=0, bias=False), 
-                nn.BatchNorm2d(self.ch1), nn.SiLU())
-        if vel:
-            self.v0 = nn.Sequential(
-                nn.Conv1d(1, self.ch1, 3, bias=False), nn.BatchNorm1d(self.ch1), nn.SiLU())
-        # ----------------------------------------------------------------------------------------------------
-        self.l1 = TCN_GCN_unit(self.ch, self.ch1, A, residual=False)
-
-        if frames:
-            self.conv1 = nn.Sequential(
+                nn.BatchNorm2d(self.ch1), 
+                nn.SiLU())
+            self.ctx_encoder1 = nn.Sequential(
                 nn.Conv2d(self.ch1, self.ch1, kernel_size=3, stride=1, padding=0, bias=False), 
-                nn.BatchNorm2d(self.ch1), nn.SiLU())
-        if vel:
-            self.v1 = nn.Sequential(
-                nn.Conv1d(self.ch1, self.ch1, 3, bias=False), 
-                nn.BatchNorm1d(self.ch1), nn.SiLU())
-        # ----------------------------------------------------------------------------------------------------
-        self.l2 = TCN_GCN_unit(self.ch1, self.ch2, A)
-
-        if frames:
-            self.conv2 = nn.Sequential(
+                nn.BatchNorm2d(self.ch1), 
+                nn.SiLU())
+            self.ctx_encoder2 = nn.Sequential(
                 nn.Conv2d(self.ch1, self.ch2, kernel_size=2, stride=1, padding=0, bias=False), 
-                nn.BatchNorm2d(self.ch2), nn.SiLU())
-            
-        if vel:
-            self.v2 = nn.Sequential(
+                nn.BatchNorm2d(self.ch2), 
+                nn.SiLU())
+            self.ctx_proj_gap = nn.AdaptiveAvgPool2d(1)
+            ctx_proj = []
+            for i in range(self.n_mlp):
+                if i == 0:
+                    ctx_proj.append(nn.Linear(self.ch2, self.proj_dim))
+                else:
+                    ctx_proj.append(nn.Linear(self.ch2, self.proj_dim))
+                if self.proj_norm == 'ln':
+                    ctx_proj.append(nn.LayerNorm(self.proj_dim))
+                elif self.proj_norm == 'bn':
+                    ctx_proj.append(nn.BatchNorm1d(self.proj_dim))
+                if self.proj_actv == 'silu':
+                    ctx_proj.append(nn.SiLU())
+                elif self.proj_actv == 'relu':
+                    ctx_proj.append(nn.ReLU())
+                elif self.proj_actv == 'leakyrelu':
+                    ctx_proj.append(nn.LeakyReLU())
+            if self.n_mlp > 1:
+                ctx_proj.append(nn.Linear(self.proj_dim, self.proj_dim))
+            self.ctx_proj = nn.Sequential(
+                *ctx_proj
+            )
+        if 'ego' in self.modalities:
+            self.ego_encoder0 = nn.Sequential(
+                nn.Conv1d(1, self.ch1, 2, bias=False),   # kernel: 3 --> 2
+                nn.BatchNorm1d(self.ch1), 
+                nn.SiLU())
+            self.ego_encoder1 = nn.Sequential(
+                nn.Conv1d(self.ch1, self.ch1, 2, bias=False),    # kernel: 3 --> 2
+                nn.BatchNorm1d(self.ch1), 
+                nn.SiLU())
+            self.ego_encoder2 = nn.Sequential(
                 nn.Conv1d(self.ch1, self.ch2, kernel_size=2, bias=False), 
-                nn.BatchNorm1d(self.ch2), nn.SiLU())
+                nn.BatchNorm1d(self.ch2), 
+                nn.SiLU())
+            self.ego_proj_gap = nn.AdaptiveAvgPool1d(1)
+            ego_proj = []
+            for i in range(self.n_mlp):
+                if i == 0:
+                    ego_proj.append(nn.Linear(self.ch2, self.proj_dim))
+                else:
+                    ego_proj.append(nn.Linear(self.proj_dim, self.proj_dim))
+                if self.proj_norm == 'ln':
+                    ego_proj.append(nn.LayerNorm(self.proj_dim))
+                elif self.proj_norm == 'bn':
+                    ego_proj.append(nn.BatchNorm1d(self.proj_dim))
+                if self.proj_actv == 'silu':
+                    ego_proj.append(nn.SiLU())
+                elif self.proj_actv == 'relu':
+                    ego_proj.append(nn.ReLU())
+                elif self.proj_actv == 'leakyrelu':
+                    ego_proj.append(nn.LeakyReLU())
+            if self.n_mlp > 1:
+                ego_proj.append(nn.Linear(self.proj_dim, self.proj_dim))
+            self.ego_proj = nn.Sequential(
+                *ego_proj
+            )
+        # ----------------------------------------------------------------------------------------------------
+        self.sklt_encoder1 = TCN_GCN_unit(self.ch, self.ch1, A, residual=False)
+        self.sklt_encoder2 = TCN_GCN_unit(self.ch1, self.ch2, A)
+        self.gap = nn.AdaptiveAvgPool2d(1)
+        sklt_proj = []
+        for i in range(self.n_mlp):
+            if i == 0:
+                sklt_proj.append(nn.Linear(self.ch2, self.proj_dim))
+            else:
+                sklt_proj.append(nn.Linear(self.proj_dim, self.proj_dim))
+            if self.proj_norm == 'ln':
+                sklt_proj.append(nn.LayerNorm(self.proj_dim))
+            elif self.proj_norm == 'bn':
+                sklt_proj.append(nn.BatchNorm1d(self.proj_dim))
+            if self.proj_actv == 'silu':
+                sklt_proj.append(nn.SiLU())
+            elif self.proj_actv == 'relu':
+                sklt_proj.append(nn.ReLU())
+            elif self.proj_actv == 'leakyrelu':
+                sklt_proj.append(nn.LeakyReLU())
+        if self.n_mlp > 1:
+            sklt_proj.append(nn.Linear(self.proj_dim, self.proj_dim))
+        self.sklt_proj = nn.Sequential(
+            *sklt_proj
+        )
         # ----------------------------------------------------------------------------------------------------
         # self.l3 = TCN_GCN_unit(self.ch2, self.ch2, A)
 
@@ -79,60 +152,65 @@ class pedMondel(nn.Module):
         #         nn.BatchNorm1d(self.ch2), nn.SiLU())
         # ----------------------------------------------------------------------------------------------------
         
-
-        self.gap = nn.AdaptiveAvgPool2d(1)
-        
         self.att = nn.Sequential(
             nn.SiLU(),
             nn.Linear(self.ch2, self.ch2, bias=False),
             nn.BatchNorm1d(self.ch2), 
             nn.Sigmoid()
         )
-
-        self.last_layer = nn.Linear(self.ch2, self.n_clss)
-        nn.init.normal_(self.last_layer.weight, 0, math.sqrt(2. / self.n_clss))
+        self.last_layers = {}
+        for act_set in self.act_sets:
+            self.last_layers[act_set] = nn.Linear(self.ch2, KEY_2_N_CLS[act_set])
+            nn.init.normal_(self.last_layers[act_set].weight, 0, math.sqrt(2. / KEY_2_N_CLS[act_set]))
+        self.last_layers = nn.ModuleDict(self.last_layers)
         # pooling sigmoid fucntion for image feature fusion
-        self.pool_sigm_2d = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
-            nn.Sigmoid()
-        )
-        if vel:
-            self.pool_sigm_1d = nn.Sequential(
-                nn.AdaptiveAvgPool1d(1),
-                nn.Sigmoid()
-            )
-        
+        self.ctx_sigm = nn.Sigmoid()
+        if 'ego' in self.modalities:
+            self.ego_sigm = nn.Sigmoid()
     
-    def forward(self, kp, frame=None, vel=None): 
-
+    def forward(self, x): 
+        kp = x.get('sklt')
+        frame = x.get('ctx')  # b 4 h w
         B, C, T, V = kp.shape  # b, 2, t, 17
-        kp = kp.permute(0, 1, 3, 2).contiguous().view(B, C * V, T)
+        kp = kp.permute(0, 1, 3, 2).contiguous().view(B, C * V, T)  # b 2*17, t
         kp = self.data_bn(kp)
         kp = kp.view(B, C, V, T).permute(0, 1, 3, 2).contiguous()
+        if 'ego' in x:
+            vel = x.get('ego')  # b t
+            vel = vel.view(B, 1, T)  # b 1 t
         
-        if self.frames:
-            f1 = self.conv0(frame) 
-        if self.vel:
-            v1 = self.v0(vel)
+        if 'ctx' in self.modalities:
+            f1 = self.ctx_encoder0(frame) 
+        if 'ego' in self.modalities:
+            v1 = self.ego_encoder0(vel)
 
         # --------------------------
-        x1 = self.l1(kp)
-        if self.frames:
-            f1 = self.conv1(f1)   
-            x1.mul(self.pool_sigm_2d(f1))
-        if self.vel:   
-            v1 = self.v1(v1)
-            x1 = x1.mul(self.pool_sigm_1d(v1).unsqueeze(-1))
+        x1 = self.sklt_encoder1(kp)
+        if 'ctx' in self.modalities:
+            f1 = self.ctx_encoder1(f1)
+            f1_gap = self.ctx_proj_gap(f1)
+            f1_sigm = self.ctx_sigm(f1_gap)
+            x1 = x1 * f1_sigm
+        if 'ego' in self.modalities:
+            v1 = self.ego_encoder1(v1)
+            v1_gap = self.ego_proj_gap(v1)
+            v1_sigm = self.ego_sigm(v1_gap)
+            x1 = x1 * v1_sigm.unsqueeze(-1)
         # --------------------------
         
         # --------------------------
-        x1 = self.l2(x1)
-        if self.frames:
-            f1 = self.conv2(f1) 
-            x1 = x1.mul(self.pool_sigm_2d(f1))
-        if self.vel:  
-            v1 = self.v2(v1)
-            x1 = x1.mul(self.pool_sigm_1d(v1).unsqueeze(-1))
+        x1 = self.sklt_encoder2(x1)
+        x_fuse = x1
+        if 'ctx' in self.modalities:
+            f1 = self.ctx_encoder2(f1)
+            f1_gap = self.ctx_proj_gap(f1)
+            f1_sigm = self.ctx_sigm(f1_gap)
+            x_fuse = x_fuse * f1_sigm
+        if 'ego' in self.modalities:  
+            v1 = self.ego_encoder2(v1)
+            v1_gap = self.ego_proj_gap(v1)
+            v1_sigm = self.ego_sigm(v1_gap)
+            x_fuse = x_fuse * v1_sigm.unsqueeze(-1)
         # --------------------------
         # x1 = self.l3(x1)
         # if self.frames:
@@ -142,15 +220,36 @@ class pedMondel(nn.Module):
         #     v1 = self.v3(v1)
         #     x1 = x1.mul(self.pool_sigm_1d(v1).unsqueeze(-1))
         # --------------------------
+        
+        x_gap = self.sklt_proj(self.gap(x1).view(B, self.ch2))
+        feats = {'sklt': x_gap}
+        if 'ctx' in self.modalities:
+            f1_gap = self.ctx_proj(f1_gap.view(B, self.ch2))
+            feats['ctx'] = f1_gap
+        if 'ego' in self.modalities:
+            v1_gap = self.ego_proj(v1_gap.view(B, self.ch2))
+            feats['ego'] = v1_gap
+        if self.pretrain:
+            return feats
+        
+        x_fuse = self.gap(x_fuse).view(B, self.ch2)  # b C t 17 --> b C
+        x_fuse = self.att(x_fuse).mul(x_fuse) + x_fuse
+        x_fuse = self.drop(x_fuse)
+        logits = {}
+        for act_set in self.act_sets:
+            logits[act_set] = self.last_layers[act_set](x_fuse)
 
-        x1 = self.gap(x1).squeeze(-1)
-        x1 = x1.squeeze(-1)
-        x1 = self.att(x1).mul(x1) + x1
-        x1 = self.drop(x1)
-        x1 = self.last_layer(x1)
-
-        return x1
-
+        return logits, feats
+    
+    def get_pretrain_params(self):
+        bb_params = []
+        other_params = []
+        for n, p in self.named_parameters():
+            if 'encoder' in n or 'proj' in n:
+                bb_params.append(p)
+            else:
+                other_params.append(p)
+        return bb_params, other_params
 
 def conv_init(conv):
     if conv.weight is not None:
@@ -259,18 +358,34 @@ class unit_gcn(nn.Module):
 class TCN_GCN_unit(nn.Module):
     def __init__(self, in_channels, out_channels, A, stride=1, residual=True, adaptive=True):
         super(TCN_GCN_unit, self).__init__()
+        self.residual = residual
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.stride = stride
         self.gcn1 = unit_gcn(in_channels, out_channels, A, adaptive=adaptive)
         self.tcn1 = unit_tcn(out_channels, out_channels, stride=stride)
         self.relu = nn.ReLU(inplace=True)
-        if not residual:
-            self.residual = lambda x: 0
-
-        elif (in_channels == out_channels) and (stride == 1):
-            self.residual = lambda x: x
-
-        else:
-            self.residual = unit_tcn(in_channels, out_channels, kernel_size=1, stride=stride)
+        if self.residual:
+            self.residual_module = unit_tcn(in_channels, out_channels, kernel_size=1, stride=stride)
 
     def forward(self, x):
-        y = self.relu(self.tcn1(self.gcn1(x)) + self.residual(x))
+        if not self.residual:
+            y = self.relu(self.tcn1(self.gcn1(x)))
+        elif (self.in_channels == self.out_channels) and (self.stride == 1):
+            y = self.relu(self.tcn1(self.gcn1(x)) + x)
+        else:
+            y = self.relu(self.tcn1(self.gcn1(x)) + self.residual_module(x))
         return y
+
+
+if __name__ == '__main__':
+    kp = torch.ones(size=[4, 2, 4, 17])
+    vel = torch.ones(size=[4, 4])
+    ctx = torch.ones(size=[4, 4, 4, 48, 48])
+    x = {
+        'ctx': ctx,
+        'sklt': kp,
+        'ego': vel,
+    }
+    model = PedGraph()
+    print(model(x))
