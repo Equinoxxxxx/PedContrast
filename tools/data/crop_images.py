@@ -10,6 +10,7 @@ from nuscenes.nuscenes import NuScenes
 from .coord_transform import nusc_3dbbox_to_2dbbox
 from ..datasets.pie_data import PIE
 from ..datasets.jaad_data import JAAD
+from config import dataset_root
 
 
 def crop_img(img, bbox, resize_mode, target_size=(224, 224)):
@@ -92,9 +93,8 @@ def crop_img_PIE_JAAD(resize_mode='even_padded',
                       ):
     import os
     if dataset_name == 'PIE':
-        cropped_root = '/home/y_feng/workspace6/datasets/PIE_dataset/cropped_images'
-        dataset_root = '/home/y_feng/workspace6/datasets/PIE_dataset'
-        data_base = PIE(data_path=dataset_root)
+        pie_jaad_root = os.path.join(dataset_root, 'PIE_dataset')
+        data_base = PIE(data_path=pie_jaad_root)
         data_opts = {'normalize_bbox': False,
                          'fstride': 1,
                          'sample_type': 'all',
@@ -115,8 +115,7 @@ def crop_img_PIE_JAAD(resize_mode='even_padded',
                          'output_type': ['intention_binary', 'bbox']
                          }
     else:
-        cropped_root = '/home/y_feng/workspace6/datasets/JAAD/cropped_images'
-        dataset_root = '/home/y_feng/workspace6/datasets/JAAD'
+        pie_jaad_root = os.path.join(dataset_root, 'JAAD')
         data_opts = {'fstride': 1,
              'sample_type': 'all',  
 	         'subset': 'high_visibility',
@@ -129,7 +128,8 @@ def crop_img_PIE_JAAD(resize_mode='even_padded',
                                'val_data': True,
                                'regen_data': True},
              'kfold_params': {'num_folds': 5, 'fold': 1}}
-        data_base = JAAD(data_path='/home/y_feng/workspace6/datasets/JAAD')
+        data_base = JAAD(data_path=pie_jaad_root)
+    cropped_root = os.path.join(pie_jaad_root, 'cropped_images')
     data_dir = os.path.join(cropped_root, resize_mode, str(target_size[0])+'w_by_'+str(target_size[1])+'h')
     makedir(data_dir)
 
@@ -195,12 +195,10 @@ def crop_img_PIE_JAAD(resize_mode='even_padded',
             cv2.imwrite(target_path, resized)
         print(i, ped_dir, 'done')
 
-def save_ctx_PIE_JAAD(mode='mask_ped', target_size=(224, 224), dataset_name='PIE'):
-    import os
+def crop_ctx_PIE_JAAD(mode='ori_local', target_size=(224, 224), dataset_name='PIE'):
     if dataset_name == 'PIE':
-        context_root = '/home/y_feng/workspace6/datasets/PIE_dataset/context'
-        dataset_root = '/home/y_feng/workspace6/datasets/PIE_dataset'
-        data_base = PIE(data_path=dataset_root)
+        pie_jaad_root = os.path.join(dataset_root, 'PIE_dataset')
+        data_base = PIE(data_path=pie_jaad_root)
         data_opts = {'normalize_bbox': False,
                          'fstride': 1,
                          'sample_type': 'all',
@@ -221,8 +219,7 @@ def save_ctx_PIE_JAAD(mode='mask_ped', target_size=(224, 224), dataset_name='PIE
                          'output_type': ['intention_binary', 'bbox']
                          }
     else:
-        context_root = '/home/y_feng/workspace6/datasets/JAAD/context'
-        dataset_root = '/home/y_feng/workspace6/datasets/JAAD'
+        pie_jaad_root = os.path.join(dataset_root, 'JAAD')
         data_opts = {'fstride': 1,
              'sample_type': 'all',  
 	         'subset': 'high_visibility',
@@ -235,7 +232,8 @@ def save_ctx_PIE_JAAD(mode='mask_ped', target_size=(224, 224), dataset_name='PIE
                                'val_data': True,
                                'regen_data': True},
              'kfold_params': {'num_folds': 5, 'fold': 1}}
-        data_base = JAAD(data_path=dataset_root)
+        data_base = JAAD(data_path=pie_jaad_root)
+    context_root = os.path.join(pie_jaad_root, 'context')
     makedir(context_root)
     data_dir = os.path.join(context_root, mode, str(target_size[0])+'w_by_'+str(target_size[1])+'h')
     makedir(data_dir)
@@ -355,9 +353,9 @@ def save_ctx_PIE_JAAD(mode='mask_ped', target_size=(224, 224), dataset_name='PIE
             print(i, ped_dir, 'done')
 
 def crop_img_TITAN(tracks, resize_mode='even_padded', target_size=(224, 224), obj_type='p'):
-    crop_root = '/home/y_feng/workspace6/datasets/TITAN/TITAN_extra/cropped_images'
+    crop_root = os.path.join(dataset_root, '/TITAN/TITAN_extra/cropped_images')
     makedir(crop_root)
-    data_root = '/home/y_feng/workspace6/datasets/TITAN/honda_titan_dataset/dataset'
+    data_root = os.path.join(dataset_root, '/TITAN/honda_titan_dataset/dataset')
     if obj_type == 'p':
         crop_obj_path = os.path.join(crop_root, resize_mode, str(target_size[0])+'w_by_'+str(target_size[1])+'h', 'ped')
         makedir(crop_obj_path)
@@ -405,11 +403,11 @@ def crop_img_TITAN(tracks, resize_mode='even_padded', target_size=(224, 224), ob
             cv2.imwrite(tgt_path, resized)
         print(i, cid, cur_obj_path, 'done')
 
-def crop_ctx_TITAN(tracks, mode='local', target_size=(224, 224), obj_type='p'):
+def crop_ctx_TITAN(tracks, mode='ori_local', target_size=(224, 224), obj_type='p'):
     ori_H, ori_W = 1520, 2704
-    crop_root = '/home/y_feng/workspace6/datasets/TITAN/TITAN_extra/context'
+    crop_root = os.path.join(dataset_root, '/TITAN/TITAN_extra/context')
     makedir(crop_root)
-    data_root = '/home/y_feng/workspace6/datasets/TITAN/honda_titan_dataset/dataset'
+    data_root = os.path.join(dataset_root, '/TITAN/honda_titan_dataset/dataset')
     if obj_type == 'p':
         crop_obj_path = os.path.join(crop_root, mode, str(target_size[0])+'w_by_'+str(target_size[1])+'h', 'ped')
         makedir(crop_obj_path)
@@ -498,32 +496,32 @@ def crop_ctx_TITAN(tracks, mode='local', target_size=(224, 224), obj_type='p'):
     else:
         raise NotImplementedError(mode)
 
-def crop_img_nusc(obj_type='ped', sensor='CAM_FRONT', modality='img', resize_mode='even_padded', target_size=(224, 224)):
+def crop_img_ctx_nusc(obj_type='ped', sensor='CAM_FRONT', modality='img', resize_mode='even_padded', target_size=(224, 224)):
     print(f'{obj_type}, {sensor}, {modality}, {resize_mode}')
     nusc = NuScenes(version='v1.0-trainval', dataroot=NUSC_ROOT, verbose=True)
 
-    f = open('/home/y_feng/workspace6/datasets/nusc/extra/token_id/trainval_token_to_sample_id.pkl', 'rb')
+    f = open(os.path.join(dataset_root, '/nusc/extra/trainval_token_to_sample_id.pkl'), 'rb')
     token_to_sample_id = pickle.load(f)
     f.close()
 
-    f = open('/home/y_feng/workspace6/datasets/nusc/extra/token_id/trainval_token_to_instance_id.pkl', 'rb')
+    f = open(os.path.join(dataset_root, '/nusc/extra/trainval_token_to_instance_id.pkl', 'rb'))
     token_to_instance_id = pickle.load(f)
     f.close()
 
-    f = open(os.path.join('/home/y_feng/workspace6/datasets/nusc/extra', '_'.join(['anns_train', obj_type, sensor])+'.pkl'), 'rb')
+    f = open(os.path.join(dataset_root, '/nusc/extra', '_'.join(['anns_train', obj_type, sensor])+'.pkl'), 'rb')
     instk_to_anntks = pickle.load(f)
     f.close()
-    f = open(os.path.join('/home/y_feng/workspace6/datasets/nusc/extra', '_'.join(['anns_val', obj_type, sensor])+'.pkl'), 'rb')
+    f = open(os.path.join(dataset_root, '/nusc/extra', '_'.join(['anns_val', obj_type, sensor])+'.pkl'), 'rb')
     val_instk_to_anntks = pickle.load(f)
     f.close()
     instk_to_anntks.update(val_instk_to_anntks)
 
     if modality == 'img':
-        root = '/home/y_feng/workspace6/datasets/nusc/extra/cropped_images'
+        root = os.path.join(dataset_root, '/nusc/extra/cropped_images')
         root = os.path.join(root, sensor, resize_mode, str(target_size[0])+'w_by_'+str(target_size[1])+'h', obj_type)
         makedir(root)
     elif modality == 'ctx':
-        root = '/home/y_feng/workspace6/datasets/nusc/extra/context'
+        root = os.path.join(dataset_root, '/nusc/extra/context')
         root = os.path.join(root, sensor, resize_mode, str(target_size[0])+'w_by_'+str(target_size[1])+'h', obj_type)
         makedir(root)
 
@@ -556,7 +554,7 @@ def crop_img_nusc(obj_type='ped', sensor='CAM_FRONT', modality='img', resize_mod
             save_path = os.path.join(ins_path, samid+'.png')
             cv2.imwrite(save_path, cropped_img)
 
-def crop_img_ctx_bdd100k(data_root='/home/y_feng/workspace6/datasets/BDD100k/bdd100k',
+def crop_img_ctx_bdd100k(data_root=os.path.join(dataset_root, '/BDD100k/bdd100k'),
                      sub_set='train_val',
                      resize_mode='even_padded',
                      ctx_format='ori_local',

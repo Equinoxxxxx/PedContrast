@@ -5,8 +5,9 @@ from ..data.coord_transform import nusc_3dbbox_to_2dbbox
 from ..visualize import draw_box, draw_boxes_on_img
 from ..utils import makedir
 from ..data.normalize import img_mean_std, norm_imgs
-from .dataset_id import DATASET2ID, ID2DATASET
+from .dataset_id import DATASET2ID
 from ..data.transforms import RandomHorizontalFlip, RandomResizedCrop, crop_local_ctx
+from config import dataset_root
 
 import numpy as np
 import pickle
@@ -20,7 +21,7 @@ cv2.ocl.setUseOpenCL(False)
 import copy
 import pdb
 
-NUSC_ROOT = '/home/y_feng/workspace6/datasets/nusc/'
+NUSC_ROOT = os.path.join(dataset_root, 'nusc')
 
 
 class NuscDataset(torch.utils.data.Dataset):
@@ -104,12 +105,12 @@ class NuscDataset(torch.utils.data.Dataset):
         self.nusc = NuScenes(version='v1.0-trainval', 
                              dataroot=NUSC_ROOT, 
                              verbose=True)
-        self.imgnm_to_objid_path = os.path.join(self.extra_root, 
-                                                self.subset+'_imgnm_to_objid_to_ann.pkl')
+        # self.imgnm_to_objid_path = os.path.join(self.extra_root, 
+        #                                         self.subset+'_imgnm_to_objid_to_ann.pkl')
 
         # get vehicle tracks and pedestrian tracks
         self.p_tracks = self.get_obj_tracks(obj_type='ped')
-        self.v_tracks = self.get_obj_tracks(obj_type='veh')
+        # self.v_tracks = self.get_obj_tracks(obj_type='veh')
 
 
         # add the acceleration to the pedestrian tracks
@@ -118,14 +119,14 @@ class NuscDataset(torch.utils.data.Dataset):
 
 
         # get cid to img name to obj id dict
-        if not os.path.exists(self.imgnm_to_objid_path):
-            self.imgnm_to_objid = \
-                self.get_imgnm_to_objid(self.p_tracks, 
-                                        self.v_tracks, 
-                                        self.imgnm_to_objid_path)
-        else:
-            with open(self.imgnm_to_objid_path, 'rb') as f:
-                self.imgnm_to_objid = pickle.load(f)
+        # if not os.path.exists(self.imgnm_to_objid_path):
+        #     self.imgnm_to_objid = \
+        #         self.get_imgnm_to_objid(self.p_tracks, 
+        #                                 self.v_tracks, 
+        #                                 self.imgnm_to_objid_path)
+        # else:
+        #     with open(self.imgnm_to_objid_path, 'rb') as f:
+        #         self.imgnm_to_objid = pickle.load(f)
         
         # convert tracks into samples
         self.samples = self.tracks_to_samples(self.p_tracks)
@@ -739,7 +740,7 @@ def save_scene_token_dict():
         scene_id_to_token[str(i)] = cur_t
         token_to_scene_id[cur_t] = str(i)
         print(f'scene {i} done')
-    save_path = '/home/y_feng/workspace6/datasets/nusc/extra'
+    save_path = os.path.join(dataset_root, 'nusc/extra')
     with open(os.path.join(save_path, 'trainval_scene_id_to_token.pkl'), 'wb') as f:
         pickle.dump(scene_id_to_token, f)
     with open(os.path.join(save_path, 'trainval_token_to_scene_id.pkl'), 'wb') as f:
@@ -757,7 +758,7 @@ def save_sample_token_dict():
         sample_id_to_token[str(i)] = cur_t
         token_to_sample_id[cur_t] = str(i)
         print(f'sample {i} done')
-    save_path = '/home/y_feng/workspace6/datasets/nusc/extra'
+    save_path = os.path.join(dataset_root, 'nusc/extra')
     with open(os.path.join(save_path, 'trainval_sample_id_to_token.pkl'), 'wb') as f:
         pickle.dump(sample_id_to_token, f)
     with open(os.path.join(save_path, 'trainval_token_to_sample_id.pkl'), 'wb') as f:
@@ -775,7 +776,7 @@ def save_instance_token_dict():
         instance_id_to_token[str(i)] = cur_t
         token_to_instance_id[cur_t] = str(i)
         print(f'instance {i} done')
-    save_path = '/home/y_feng/workspace6/datasets/nusc/extra'
+    save_path = os.path.join(dataset_root, 'nusc/extra')
     with open(os.path.join(save_path, 'trainval_instance_id_to_token.pkl'), 'wb') as f:
         pickle.dump(instance_id_to_token, f)
     with open(os.path.join(save_path, 'trainval_token_to_instance_id.pkl'), 'wb') as f:
@@ -800,10 +801,11 @@ def _save_ins_to_ann_to_dict():
     with open(os.path.join(save_path, 'trainval_ins_to_id_to_ann.pkl'), 'wb') as f:
         pickle.dump(instk_to_id_to_anntk, f)
 
-def save_ins_tokens(subset, cate):
+def save_ins_tokens(subset='train', cate='ped'):
     '''
     save instance tokens of specific subset and category
     '''
+    _cate = 'human' if cate == 'ped' else 'vehicle'
     tokens_to_save = []
     nusc = NuScenes(version='v1.0-trainval', dataroot=NUSC_ROOT, verbose=True)
     for ins in nusc.instance:
@@ -815,16 +817,22 @@ def save_ins_tokens(subset, cate):
             scenes_cur_subset = TRAIN_SC
         elif subset == 'val':
             scenes_cur_subset = VAL_SC
-        if cur_sce['name'] not in scenes_cur_subset or category['name'].split('.')[0] != cate:
+        if cur_sce['name'] not in scenes_cur_subset or category['name'].split('.')[0] != _cate:
             print('ins '+ins['token']+' not saved')
             continue
         tokens_to_save.append(ins['token'])
         print(f'ins {tokens_to_save[-1]} saved')
-    save_path = os.path.join(NUSC_ROOT, 'extra', subset+'_'+cate+'_ins_token.pkl')
+    if _cate == 'human':
+        fnm = subset+'_'+'ped_ins_token.pkl'
+    elif _cate == 'vehicle':
+        fnm = subset+'_'+'veh_ins_token.pkl'
+    save_path = os.path.join(NUSC_ROOT, 'extra', fnm)
     with open(save_path, 'wb') as f:
         pickle.dump(tokens_to_save, f)
 
-def save_anns_in_sensor(ins_tokens_path, sensor='CAM_FRONT'):
+def save_anns_in_sensor(ins_tokens_path=os.path.join(dataset_root, 
+                                                     'nusc/extra/train_ped_ins_token.pkl'), 
+                        sensor='CAM_FRONT'):
     '''
     save annotation sequences observed by specific sensor
     '''
@@ -870,7 +878,7 @@ def is_observed_by_sensor(nusc, ann_tk, sensor):
 
 def check_3d_to_2d():
     nusc = NuScenes(version='v1.0-trainval', dataroot=NUSC_ROOT, verbose=True)
-    anns_path = '/home/y_feng/workspace6/datasets/nusc/extra/anns_train_human_CAM_FRONT.pkl'
+    anns_path = '/home/y_feng/workspace6/datasets/nusc/extra/anns_train_ped_CAM_FRONT.pkl'
     res_path = './module_test'
     makedir(res_path)
     with open(anns_path, 'rb') as f:

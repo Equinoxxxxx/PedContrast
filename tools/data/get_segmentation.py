@@ -22,7 +22,7 @@ from .crop_images import crop_img, crop_ctx
 from .coord_transform import nusc_3dbbox_to_2dbbox
 
 
-def segment_dataset(dataset_names='bdd100k',
+def segment_dataset(datasets='bdd100k',
                     prompt=['person', 'vehicle', 'road', 'traffic light'],
                     nusc_sensor='CAM_FRONT'):
 
@@ -30,11 +30,11 @@ def segment_dataset(dataset_names='bdd100k',
 
     # GroundingDINO config and checkpoint
     GROUNDING_DINO_CONFIG_PATH = "./Grounded-Segment-Anything/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py"
-    GROUNDING_DINO_CHECKPOINT_PATH = "./weights/groundingdino_swint_ogc.pth"
+    GROUNDING_DINO_CHECKPOINT_PATH = os.path.join(cktp_root, "groundingdino_swint_ogc.pth")
 
     # Segment-Anything checkpoint
     SAM_ENCODER_VERSION = "vit_h"
-    SAM_CHECKPOINT_PATH = "./weights/sam_vit_h_4b8939.pth"
+    SAM_CHECKPOINT_PATH = os.path.join(cktp_root, "sam_vit_h_4b8939.pth")
 
     # Building GroundingDINO inference model
     grounding_dino_model = Model(model_config_path=GROUNDING_DINO_CONFIG_PATH, model_checkpoint_path=GROUNDING_DINO_CHECKPOINT_PATH)
@@ -139,7 +139,7 @@ def segment_dataset(dataset_names='bdd100k',
         return res
         
 
-    if 'TITAN' in dataset_names:
+    if 'TITAN' in datasets:
         print('TITAN')
         srcpath = DATASET_2_SRCPATH['TITAN']
         tgtpath = DATASET_2_TGTPATH['TITAN']
@@ -166,7 +166,7 @@ def segment_dataset(dataset_names='bdd100k',
                         pickle.dump(mask, f)  # H W
 
     
-    if 'PIE' in dataset_names:
+    if 'PIE' in datasets:
         print('PIE')
         srcpath = DATASET_2_SRCPATH['PIE']
         tgtpath = DATASET_2_TGTPATH['PIE']
@@ -201,7 +201,7 @@ def segment_dataset(dataset_names='bdd100k',
                         with open(tgt_f_path, 'wb') as f:
                             pickle.dump(mask, f)  # H W
         
-    if 'JAAD' in dataset_names:
+    if 'JAAD' in datasets:
         print('JAAD')
         srcpath = DATASET_2_SRCPATH['JAAD']
         tgtpath = DATASET_2_TGTPATH['JAAD']
@@ -228,7 +228,7 @@ def segment_dataset(dataset_names='bdd100k',
                     with open(tgt_f_path, 'wb') as f:
                         pickle.dump(mask, f)  # H W
 
-    if 'nuscenes' in dataset_names:
+    if 'nuscenes' in datasets:
         print('nuscenes')
         srcpath = DATASET_2_SRCPATH['nuscenes']
         tgtpath = DATASET_2_TGTPATH['nuscenes']
@@ -275,7 +275,7 @@ def segment_dataset(dataset_names='bdd100k',
                 with open(tgt_f_path, 'wb') as f:
                     pickle.dump(mask, f)
     
-    if 'bdd100k' in dataset_names:
+    if 'bdd100k' in datasets:
         print('bdd100k')
         srcpath = DATASET_2_SRCPATH['bdd100k']
         tgtpath = DATASET_2_TGTPATH['bdd100k']

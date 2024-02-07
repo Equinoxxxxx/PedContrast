@@ -27,8 +27,8 @@ from models.ped_graph23 import PedGraph
 
 from tools.utils import makedir
 from tools.log import create_logger
-from tools.utils import draw_proto_info_curves, save_model, freeze, cls_weights, seed_all
-from tools.plot import vis_weight_single_cls, draw_logits_histogram, draw_multi_task_curve, draw_curves2
+from tools.utils import save_model, seed_all
+from tools.plot import draw_curves2
 
 from train_test import contrast_epoch, train_test_epoch
 
@@ -113,7 +113,7 @@ def get_args():
     parser.add_argument('--n_mlp', type=int, default=1)
 
     # modality
-    parser.add_argument('--modalities', type=str, default='img_sklt_ctx_traj_ego')
+    parser.add_argument('--modalities', type=str, default='sklt_ctx_traj_ego')
     # img settingf
     parser.add_argument('--img_format', type=str, default='')
     parser.add_argument('--img_backbone_name', type=str, default='R3D18')
@@ -637,7 +637,6 @@ def main(rank, world_size, args):
         'f1': 0,
         'auc': 0,
     } for dataset_nm in test_dataset_names}
-    best_e = -1
     for e in range(1, epochs+1):
         log(f'Fine tune {e} epoch')
         model_parallel.train()
@@ -762,8 +761,7 @@ def main(rank, world_size, args):
                                             / len(test_dataset_names)
                     for dataset_nm in test_dataset_names:
                         best_test_res_sep[dataset_nm][metric] = curve_dict[dataset_nm]['test'][metric][-1]
-                best_e = e
-            log(f'Best val result:\n epoch {best_e}\n {best_val_res}\nBest test results:\n {best_test_res}')
+            # log(f'Best val result:\n epoch {best_e}\n {best_val_res}\nBest test results:\n {best_test_res}')
             for metric in best_val_res:
                 cur_metric_macro = sum([curve_dict[d]['test'][metric][-1] for d in test_dataset_names]) \
                                             / len(test_dataset_names)
@@ -772,9 +770,9 @@ def main(rank, world_size, args):
                 save_model(model=model, model_dir=ckpt_dir, 
                             model_name=str(e) + '_',
                             log=log)
-    log(f'\nBest val result:\n epoch {best_e}\n {best_val_res}')
-    log(f'\nBest test res: {best_test_res}')
-    log(f'\nBest test res per dataset: {best_test_res_sep}')
+    # log(f'\nBest val result:\n epoch {best_e}\n {best_val_res}')
+    # log(f'\nBest test res: {best_test_res}')
+    # log(f'\nBest test res per dataset: {best_test_res_sep}')
     if p_epochs > 0:
         log(f'\nFinal contrastive loss:')
         log(pre_curve_dict['contrast_loss'][-1].cpu().numpy())

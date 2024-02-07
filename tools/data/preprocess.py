@@ -5,16 +5,19 @@ import pickle
 import json
 from tqdm import tqdm
 from ..utils import makedir
-from .crop_images import crop_img_ctx_bdd100k
-from .get_skeletons import get_skeleton_bdd100k
+from .crop_images import crop_img_ctx_bdd100k, crop_ctx_PIE_JAAD, crop_img_PIE_JAAD, crop_img_TITAN, crop_ctx_TITAN, crop_img_ctx_nusc
+from .get_skeletons import get_skeletons
 from .get_segmentation import segment_dataset
-from config import dataset_root
+from config import dataset_root, datasets
+from ..datasets.nuscenes_dataset import save_scene_token_dict, save_instance_token_dict, save_sample_token_dict, save_ins_tokens, save_anns_in_sensor
 
 
 # bdd100k procedure: get vid_id2nm --> crop images --> get skeletons & segmentation maps
 
-def bdd100k_get_vidnm2vidid(data_root='/home/y_feng/workspace6/datasets/BDD100k/bdd100k',
+def bdd100k_get_vidnm2vidid(data_root=os.path.join(dataset_root, 
+                                                   'BDD100k/bdd100k'),
                             sub_set='train_val'):
+    
     vid_nms = []
     id2nm = {}
     nm2id = {}
@@ -36,21 +39,39 @@ def bdd100k_get_vidnm2vidid(data_root='/home/y_feng/workspace6/datasets/BDD100k/
     return id2nm, nm2id
 
 
-def prepare_data():
-    # bdd100k
-    # crop images
-    # crop_img_ctx_bdd100k(img_size=(224, 224))
-    # crop_img_ctx_bdd100k(ctx_format='', img_size=(384, 288))
-    print('Get skeletons of bdd100k')
-    get_skeleton_bdd100k(img_root=os.path.join(dataset_root, 'BDD100k/bdd100k/extra/cropped_images/even_padded/288w_by_384h/ped'),
-                         tgt_root=os.path.join(dataset_root, 'BDD100k/bdd100k/extra/'))
-    print('Get segmentation maps of bdd100k')
-    for prompt in ('person', 'vehicle', 'road', 'traffic light'):
-        print(prompt)
-        segment_dataset(dataset_names='bdd100k',
-                        prompt=prompt)
+def prepare_data(datasets):
+    if 'PIE' in datasets:
+        crop_img_PIE_JAAD(dataset_name='PIE')
+        crop_ctx_PIE_JAAD(dataset_name='PIE')
+    if 'JAAD' in datasets:
+        crop_img_PIE_JAAD(dataset_name='JAAD')
+        crop_ctx_PIE_JAAD(dataset_name='JAAD')
+    if 'TITAN' in datasets:
+        crop_img_TITAN()
+        crop_ctx_TITAN()
+    if 'nuscenes' in datasets:
+        save_instance_token_dict()
+        save_scene_token_dict()
+        save_sample_token_dict()
+        for subset in ('train', 'val'):
+            for obj_type in ('ped', 'veh'):
+                save_ins_tokens(subset=subset, cate=obj_type)
+                save_anns_in_sensor(ins_tokens_path=os.path.join(dataset_root, 
+                                                                'nusc/extra', 
+                                                                '_'.join([subset, obj_type, 'ins_token.pkl'])), 
+                                    sensor='CAM_FRONT')
+        # crop images
+        crop_img_ctx_nusc()
+        crop_img_ctx_nusc(modality='ctx', resize_mode='ori_local')
+    if 'bdd100k' in datasets:
+        bdd100k_get_vidnm2vidid()
+        crop_img_ctx_bdd100k()
+    get_skeletons(datasets=datasets)
+    segment_dataset(datasets=datasets)
+
 
 if __name__ == '__main__':
+    prepare_data()
     # get video name to id
     # bdd100k_get_vidnm2vidid()
     # path = '/home/y_feng/workspace6/datasets/BDD100k/bdd100k/extra/vid_id2nm.pkl'

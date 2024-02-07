@@ -65,8 +65,14 @@ def extract_single(model, img_path, dataset='coco'):
     # pdb.set_trace()
     return heatmap_img, joints, heatmaps[0]
 
-def save_nuscenes_skeletons(img_root='/home/y_feng/workspace6/datasets/nusc/extra/cropped_images/CAM_FRONT/even_padded/288w_by_384h/human',
-                            tgt_root='/home/y_feng/workspace6/datasets/nusc/extra'):
+def get_skeletons_PIE():
+    imgroot = os.path.join(dataset_root,
+                           '')
+
+
+def get_skeletons_nuscenes(img_root=os.path.join(dataset_root, 
+                                                 'nusc/extra/cropped_images/CAM_FRONT/even_padded/288w_by_384h/human'),
+                            tgt_root=os.path.join(dataset_root, 'nusc/extra')):
     format = 'coco'
     pseudo_h = 48
     pseudo_w = 48
@@ -91,7 +97,8 @@ def save_nuscenes_skeletons(img_root='/home/y_feng/workspace6/datasets/nusc/extr
     # with open('/home/y_feng/workspace6/datasets/nusc/extra/token_id/trainval_sample_id_to_token.pkl', 'rb') as f:
     #     samid_to_token = pickle.load(f)
     
-    model = SimpleHRNet(c=48, nof_joints=17, checkpoint_path="./weights/pose_hrnet_w48_384x288.pth", 
+    model = SimpleHRNet(c=48, nof_joints=17, 
+                        checkpoint_path=os.path.join(cktp_root, "/pose_hrnet_w48_384x288.pth"), 
                         multiperson=False, return_heatmaps=True, resolution=(384, 288))
     for insid in tqdm(os.listdir(img_root)):
         img_ins_path = os.path.join(img_root, insid)
@@ -140,14 +147,16 @@ def save_nuscenes_skeletons(img_root='/home/y_feng/workspace6/datasets/nusc/extr
                 pickle.dump(coords, f)
             cv2.imwrite(vis_f_path, skeleton_img)
         
-        # print saved content
-        print(f'pseudo haetmap: shape{pseudo_heatmap.shape} {pseudo_heatmap}' )
-        print(f'coords: {coords}')
-        print(f'heatmap: shape {heatmaps.shape}')
-        print(f'sk img: shape {skeleton_img.shape} {skeleton_img[0, 0, 0]}')
+    # print saved content
+    print(f'pseudo haetmap: shape{pseudo_heatmap.shape} {pseudo_heatmap}' )
+    print(f'coords: {coords}')
+    print(f'heatmap: shape {heatmaps.shape}')
+    print(f'sk img: shape {skeleton_img.shape} {skeleton_img[0, 0, 0]}')
 
-def get_skeleton_bdd100k(img_root='/home/y_feng/workspace6/datasets/BDD100k/bdd100k/extra/cropped_images/even_padded/288w_by_384h/ped',
-                         tgt_root='/home/y_feng/workspace6/datasets/BDD100k/bdd100k/extra/'):
+def get_skeleton_bdd100k(img_root=os.path.join(dataset_root, 
+                                               'BDD100k/bdd100k/extra/cropped_images/even_padded/288w_by_384h/ped'),
+                         tgt_root=os.path.join(dataset_root, 
+                                               'BDD100k/bdd100k/extra/')):
     format = 'coco'
     pseudo_h = 48
     pseudo_w = 48
@@ -167,8 +176,8 @@ def get_skeleton_bdd100k(img_root='/home/y_feng/workspace6/datasets/BDD100k/bdd1
                                'sk_coords',
                                'even_padded',
                                '288w_by_384h')
-    print(os.listdir('../../'))
-    model = SimpleHRNet(c=48, nof_joints=17, checkpoint_path="./weights/pose_hrnet_w48_384x288.pth", 
+    model = SimpleHRNet(c=48, nof_joints=17, 
+                        checkpoint_path=os.path.join(cktp_root, "/pose_hrnet_w48_384x288.pth"), 
                         multiperson=False, return_heatmaps=True, resolution=(384, 288))
     for oid in tqdm(os.listdir(img_root)):
         img_oid_dir = os.path.join(img_root, oid)
@@ -224,6 +233,377 @@ def get_skeleton_bdd100k(img_root='/home/y_feng/workspace6/datasets/BDD100k/bdd1
                                     oid,
                                     img_nm)
             cv2.imwrite(vis_path, skeleton_img)
+
+
+def get_skeletons(datasets):
+    format = 'coco'
+    pseudo_h = 48
+    pseudo_w = 48
+    model = SimpleHRNet(c=48, nof_joints=17, 
+                        checkpoint_path=os.path.join(cktp_root, "/pose_hrnet_w48_384x288.pth"), 
+                        multiperson=False, return_heatmaps=True, resolution=(384, 288))
+    print('Estimating pose')
+    if 'PIE' in datasets:
+        print('PIE')
+        img_root=os.path.join(dataset_root, 
+                                'PIE_dataset/cropped_images/even_padded/288w_by_384h'),
+        tgt_root=os.path.join(dataset_root, 'PIE_dataset')
+        sk_vis_root = os.path.join(tgt_root, 
+                               'sk_vis',
+                               'even_padded',
+                               '288w_by_384h')
+        sk_pseudo_root = os.path.join(tgt_root, 
+                                'sk_pseudo_heatmaps',
+                                'even_padded',
+                                '48w_by_48h')
+        sk_heatmap_root = os.path.join(tgt_root, 
+                                'sk_heatmaps',
+                                'even_padded',
+                                '288w_by_384h')
+        sk_coord_root = os.path.join(tgt_root, 
+                                'sk_coords',
+                                'even_padded',
+                                '288w_by_384h')
+        for pid in tqdm(os.listdir(img_root)):
+            sid, vid, oid = pid.split('_')
+            img_pid_dir = os.path.join(img_root, pid)
+            for img_nm in os.listdir(img_pid_dir):
+                img_id = img_nm.replace('.png', '')
+                img_path = os.path.join(img_pid_dir, img_nm)
+                # get sk_img, coords, heatmap
+                skeleton_img, coords, heatmaps = extract_single(model=model, img_path=img_path, 
+                                            dataset=format)
+                assert skeleton_img.shape == (384, 288, 3), skeleton_img.shape
+                # get pseudo heatmap
+                ori_h, ori_w = skeleton_img.shape[:2]
+                h_ratio = pseudo_h / ori_h
+                w_ratio = pseudo_w / ori_w
+                pseudo_heatmaps = []
+                for coord in coords:  # x, y, confidence
+                    tgt_h = int(coord[0] * h_ratio)
+                    tgt_w = int(coord[1] * w_ratio)
+                    tgt_coord = (tgt_w, tgt_h)
+                    pseudo_heatmap = generate_one_pseudo_heatmap(img_h=pseudo_h,
+                                                                img_w=pseudo_w,
+                                                                centers=[tgt_coord],
+                                                                max_values=[coord[-1]])
+                    pseudo_heatmaps.append(pseudo_heatmap)
+                pseudo_heatmaps = np.stack(pseudo_heatmaps, axis=0)
+                assert pseudo_heatmaps.shape == (17, pseudo_h, pseudo_w), pseudo_heatmaps.shape
+                # save pseudo heatmaps, heatmaps, coords, sk img
+                f_nm = img_id + '.pkl'
+                pseudo_f_path = os.path.join(sk_pseudo_root,
+                                            pid,
+                                            f_nm)
+                with open(pseudo_f_path, 'wb') as f:
+                    pickle.dump(pseudo_heatmaps, f)
+                heatmap_path = os.path.join(sk_heatmap_root,
+                                            pid,
+                                            f_nm)
+                with open(heatmap_path, 'wb') as f:
+                    pickle.dump(heatmaps, f)
+                coord_path = os.path.join(sk_coord_root,
+                                        pid,
+                                        f_nm)
+                with open(coord_path, 'wb') as f:
+                    pickle.dump(coords, f)
+                vis_path = os.path.join(sk_vis_root,
+                                        pid,
+                                        img_nm)
+                cv2.imwrite(vis_path, skeleton_img)
+    if 'JAAD' in datasets:
+        print('JAAD')
+        img_root=os.path.join(dataset_root, 
+                                'JAAD/cropped_images/even_padded/288w_by_384h'),
+        tgt_root=os.path.join(dataset_root, 'JAAD')
+        sk_vis_root = os.path.join(tgt_root, 
+                               'sk_vis',
+                               'even_padded',
+                               '288w_by_384h')
+        sk_pseudo_root = os.path.join(tgt_root, 
+                                'sk_pseudo_heatmaps',
+                                'even_padded',
+                                '48w_by_48h')
+        sk_heatmap_root = os.path.join(tgt_root, 
+                                'sk_heatmaps',
+                                'even_padded',
+                                '288w_by_384h')
+        sk_coord_root = os.path.join(tgt_root, 
+                                'sk_coords',
+                                'even_padded',
+                                '288w_by_384h')
+        for pid in tqdm(os.listdir(img_root)):
+            sid, vid, oid = pid.split('_')
+            img_pid_dir = os.path.join(img_root, pid)
+            for img_nm in os.listdir(img_pid_dir):
+                img_id = img_nm.replace('.png', '')
+                img_path = os.path.join(img_pid_dir, img_nm)
+                # get sk_img, coords, heatmap
+                skeleton_img, coords, heatmaps = extract_single(model=model, img_path=img_path, 
+                                            dataset=format)
+                assert skeleton_img.shape == (384, 288, 3), skeleton_img.shape
+                # get pseudo heatmap
+                ori_h, ori_w = skeleton_img.shape[:2]
+                h_ratio = pseudo_h / ori_h
+                w_ratio = pseudo_w / ori_w
+                pseudo_heatmaps = []
+                for coord in coords:  # x, y, confidence
+                    tgt_h = int(coord[0] * h_ratio)
+                    tgt_w = int(coord[1] * w_ratio)
+                    tgt_coord = (tgt_w, tgt_h)
+                    pseudo_heatmap = generate_one_pseudo_heatmap(img_h=pseudo_h,
+                                                                img_w=pseudo_w,
+                                                                centers=[tgt_coord],
+                                                                max_values=[coord[-1]])
+                    pseudo_heatmaps.append(pseudo_heatmap)
+                pseudo_heatmaps = np.stack(pseudo_heatmaps, axis=0)
+                assert pseudo_heatmaps.shape == (17, pseudo_h, pseudo_w), pseudo_heatmaps.shape
+                # save pseudo heatmaps, heatmaps, coords, sk img
+                f_nm = img_id + '.pkl'
+                pseudo_f_path = os.path.join(sk_pseudo_root,
+                                            pid,
+                                            f_nm)
+                with open(pseudo_f_path, 'wb') as f:
+                    pickle.dump(pseudo_heatmaps, f)
+                heatmap_path = os.path.join(sk_heatmap_root,
+                                            pid,
+                                            f_nm)
+                with open(heatmap_path, 'wb') as f:
+                    pickle.dump(heatmaps, f)
+                coord_path = os.path.join(sk_coord_root,
+                                        pid,
+                                        f_nm)
+                with open(coord_path, 'wb') as f:
+                    pickle.dump(coords, f)
+                vis_path = os.path.join(sk_vis_root,
+                                        pid,
+                                        img_nm)
+                cv2.imwrite(vis_path, skeleton_img)
+    if 'TITAN' in datasets:
+        print('TITAN')
+        img_root=os.path.join(dataset_root, 
+                                'TITAN/TITAN_extra/cropped_images/even_padded/288w_by_384h/ped'),
+        tgt_root=os.path.join(dataset_root, 'TITAN/TITAN_extra')
+        sk_vis_root = os.path.join(tgt_root, 
+                               'sk_vis',
+                               'even_padded',
+                               '288w_by_384h')
+        sk_pseudo_root = os.path.join(tgt_root, 
+                                'sk_pseudo_heatmaps',
+                                'even_padded',
+                                '48w_by_48h')
+        sk_heatmap_root = os.path.join(tgt_root, 
+                                'sk_heatmaps',
+                                'even_padded',
+                                '288w_by_384h')
+        sk_coord_root = os.path.join(tgt_root, 
+                                'sk_coords',
+                                'even_padded',
+                                '288w_by_384h')
+        for vid in os.listdir(img_root):
+            vdir = os.path.join(img_root, vid)
+            for oid in os.listdir(vdir):
+                odir = os.path.join(vdir, oid)
+                for img_nm in os.listdir(odir):
+                    img_id = img_nm.replace('.png', '')
+                    img_path = os.path.join(odir, img_nm)
+                    # get sk_img, coords, heatmap
+                    skeleton_img, coords, heatmaps = extract_single(model=model, img_path=img_path, 
+                                                dataset=format)
+                    assert skeleton_img.shape == (384, 288, 3), skeleton_img.shape
+                    # get pseudo heatmap
+                    ori_h, ori_w = skeleton_img.shape[:2]
+                    h_ratio = pseudo_h / ori_h
+                    w_ratio = pseudo_w / ori_w
+                    pseudo_heatmaps = []
+                    for coord in coords:  # x, y, confidence
+                        tgt_h = int(coord[0] * h_ratio)
+                        tgt_w = int(coord[1] * w_ratio)
+                        tgt_coord = (tgt_w, tgt_h)
+                        pseudo_heatmap = generate_one_pseudo_heatmap(img_h=pseudo_h,
+                                                                    img_w=pseudo_w,
+                                                                    centers=[tgt_coord],
+                                                                    max_values=[coord[-1]])
+                        pseudo_heatmaps.append(pseudo_heatmap)
+                    pseudo_heatmaps = np.stack(pseudo_heatmaps, axis=0)
+                    assert pseudo_heatmaps.shape == (17, pseudo_h, pseudo_w), pseudo_heatmaps.shape
+                    # save pseudo heatmaps, heatmaps, coords, sk img
+                    f_nm = img_id + '.pkl'
+                    pseudo_f_path = os.path.join(sk_pseudo_root,
+                                                vid,
+                                                oid,
+                                                f_nm)
+                    with open(pseudo_f_path, 'wb') as f:
+                        pickle.dump(pseudo_heatmaps, f)
+                    heatmap_path = os.path.join(sk_heatmap_root,
+                                                vid,
+                                                oid,
+                                                f_nm)
+                    with open(heatmap_path, 'wb') as f:
+                        pickle.dump(heatmaps, f)
+                    coord_path = os.path.join(sk_coord_root,
+                                            vid,
+                                            oid,
+                                            f_nm)
+                    with open(coord_path, 'wb') as f:
+                        pickle.dump(coords, f)
+                    vis_path = os.path.join(sk_vis_root,
+                                            vid,
+                                            oid,
+                                            img_nm)
+                    cv2.imwrite(vis_path, skeleton_img)
+
+
+    if 'nuscenes' in datasets:
+        print('nuscenes')
+        img_root=os.path.join(dataset_root, 
+                                'nusc/extra/cropped_images/CAM_FRONT/even_padded/288w_by_384h/human'),
+        tgt_root=os.path.join(dataset_root, 'nusc/extra')
+        sk_vis_root = os.path.join(tgt_root, 
+                               'sk_vis',
+                               'even_padded',
+                               '288w_by_384h')
+        sk_pseudo_root = os.path.join(tgt_root, 
+                                'sk_pseudo_heatmaps',
+                                'even_padded',
+                                '48w_by_48h')
+        sk_heatmap_root = os.path.join(tgt_root, 
+                                'sk_heatmaps',
+                                'even_padded',
+                                '288w_by_384h')
+        sk_coord_root = os.path.join(tgt_root, 
+                                'sk_coords',
+                                'even_padded',
+                                '288w_by_384h')
+        for insid in tqdm(os.listdir(img_root)):
+            img_ins_path = os.path.join(img_root, insid)
+            vis_ins_path = os.path.join(sk_vis_root, insid)
+            makedir(vis_ins_path)
+            pseudo_hm_ins_path = os.path.join(sk_pseudo_root, insid)
+            makedir(pseudo_hm_ins_path)
+            hm_ins_path = os.path.join(sk_heatmap_root, insid)
+            makedir(hm_ins_path)
+            coord_ins_path = os.path.join(sk_coord_root, insid)
+            makedir(coord_ins_path)
+            for img_nm in os.listdir(img_ins_path):
+                img_path = os.path.join(img_ins_path, img_nm)
+                samid = img_nm.replace('.png', '')
+                # get sk_img, coords, heatmap
+                skeleton_img, coords, heatmaps = extract_single(model=model, img_path=img_path, 
+                                            dataset=format)
+                assert skeleton_img.shape == (384, 288, 3), skeleton_img.shape
+                # get pseudo heatmap
+                ori_h, ori_w = skeleton_img.shape[:2]
+                h_ratio = pseudo_h / ori_h
+                w_ratio = pseudo_w / ori_w
+                pseudo_heatmaps = []
+                for coord in coords:  # x, y, confidence
+                    tgt_h = int(coord[0] * h_ratio)
+                    tgt_w = int(coord[1] * w_ratio)
+                    tgt_coord = (tgt_w, tgt_h)
+                    pseudo_heatmap = generate_one_pseudo_heatmap(img_h=pseudo_h,
+                                                                img_w=pseudo_w,
+                                                                centers=[tgt_coord],
+                                                                max_values=[coord[-1]])
+                    pseudo_heatmaps.append(pseudo_heatmap)
+                pseudo_heatmaps = np.stack(pseudo_heatmaps, axis=0)
+                assert pseudo_heatmaps.shape == (17, pseudo_h, pseudo_w), pseudo_heatmaps.shape
+                # save pseudo heatmaps, heatmaps, coords, sk img
+                f_nm = samid + '.pkl'
+                pseudo_hm_f_path = os.path.join(pseudo_hm_ins_path, f_nm)
+                hm_f_path = os.path.join(hm_ins_path, f_nm)
+                coord_f_path = os.path.join(coord_ins_path, f_nm)
+                vis_f_path = os.path.join(vis_ins_path, img_nm)
+                with open(pseudo_hm_f_path, 'wb') as f:
+                    pickle.dump(pseudo_heatmaps, f)
+                with open(hm_f_path, 'wb') as f:
+                    pickle.dump(heatmaps, f)
+                with open(coord_f_path, 'wb') as f:
+                    pickle.dump(coords, f)
+                cv2.imwrite(vis_f_path, skeleton_img)
+            
+        # print saved content
+        print(f'pseudo haetmap: shape{pseudo_heatmap.shape} {pseudo_heatmap}' )
+        print(f'coords: {coords}')
+        print(f'heatmap: shape {heatmaps.shape}')
+        print(f'sk img: shape {skeleton_img.shape} {skeleton_img[0, 0, 0]}')
+    if 'bdd100k' in datasets:
+        print('bdd100k')
+        img_root=os.path.join(dataset_root, 
+                            'BDD100k/bdd100k/extra/cropped_images/even_padded/288w_by_384h/ped'),
+        tgt_root=os.path.join(dataset_root, 
+                            'BDD100k/bdd100k/extra/')
+        sk_vis_root = os.path.join(tgt_root, 
+                               'sk_vis',
+                               'even_padded',
+                               '288w_by_384h')
+        sk_pseudo_root = os.path.join(tgt_root, 
+                                'sk_pseudo_heatmaps',
+                                'even_padded',
+                                '48w_by_48h')
+        sk_heatmap_root = os.path.join(tgt_root, 
+                                'sk_heatmaps',
+                                'even_padded',
+                                '288w_by_384h')
+        sk_coord_root = os.path.join(tgt_root, 
+                                'sk_coords',
+                                'even_padded',
+                                '288w_by_384h')
+        for oid in tqdm(os.listdir(img_root)):
+            img_oid_dir = os.path.join(img_root, oid)
+            makedir(os.path.join(sk_pseudo_root,
+                                            oid))
+            makedir(os.path.join(sk_heatmap_root,
+                                            oid))
+            makedir(os.path.join(sk_coord_root,
+                                        oid))
+            makedir(os.path.join(sk_vis_root,
+                                        oid))
+            for img_nm in os.listdir(img_oid_dir):
+                img_id = img_nm.replace('.png', '')
+                img_path = os.path.join(img_oid_dir, img_nm)
+                # get sk_img, coords, heatmap
+                skeleton_img, coords, heatmaps = extract_single(model=model, img_path=img_path, 
+                                            dataset=format)
+                assert skeleton_img.shape == (384, 288, 3), skeleton_img.shape
+                # get pseudo heatmap
+                ori_h, ori_w = skeleton_img.shape[:2]
+                h_ratio = pseudo_h / ori_h
+                w_ratio = pseudo_w / ori_w
+                pseudo_heatmaps = []
+                for coord in coords:  # x, y, confidence
+                    tgt_h = int(coord[0] * h_ratio)
+                    tgt_w = int(coord[1] * w_ratio)
+                    tgt_coord = (tgt_w, tgt_h)
+                    pseudo_heatmap = generate_one_pseudo_heatmap(img_h=pseudo_h,
+                                                                img_w=pseudo_w,
+                                                                centers=[tgt_coord],
+                                                                max_values=[coord[-1]])
+                    pseudo_heatmaps.append(pseudo_heatmap)
+                pseudo_heatmaps = np.stack(pseudo_heatmaps, axis=0)
+                assert pseudo_heatmaps.shape == (17, pseudo_h, pseudo_w), pseudo_heatmaps.shape
+                # save pseudo heatmaps, heatmaps, coords, sk img
+                f_nm = img_id + '.pkl'
+                pseudo_f_path = os.path.join(sk_pseudo_root,
+                                            oid,
+                                            f_nm)
+                with open(pseudo_f_path, 'wb') as f:
+                    pickle.dump(pseudo_heatmaps, f)
+                heatmap_path = os.path.join(sk_heatmap_root,
+                                            oid,
+                                            f_nm)
+                with open(heatmap_path, 'wb') as f:
+                    pickle.dump(heatmaps, f)
+                coord_path = os.path.join(sk_coord_root,
+                                        oid,
+                                        f_nm)
+                with open(coord_path, 'wb') as f:
+                    pickle.dump(coords, f)
+                vis_path = os.path.join(sk_vis_root,
+                                        oid,
+                                        img_nm)
+                cv2.imwrite(vis_path, skeleton_img)
+
 
 
 if __name__ == '__main__':
