@@ -40,7 +40,11 @@ Extract the data in the following format:
                 ...
 ```
 ## Get the weights for Grounded SAM and HRNet
-Download the weight files
+Download the weight files to ```ckpt_root```
+[C3D](https://drive.google.com/file/d/19NWziHWh1LgCcHU34geoKwYezAogv9fX/view?usp=sharing)
+[HRNet](https://drive.google.com/open?id=1UoJhTtjHNByZSm96W3yFTfU5upJnsKiS)
+[Swin Transformer](https://github.com/IDEA-Research/GroundingDINO/releases/download/v0.1.0-alpha/groundingdino_swint_ogc.pth)
+[ViT](https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth)
 ```
 [ckpt_root]/
     c3d-pretrained.pth
