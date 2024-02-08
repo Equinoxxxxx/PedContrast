@@ -4,3 +4,15 @@
 
 ## Prepare the data
 Download the datasets ([PIE](https://github.com/aras62/PIEPredict?tab=readme-ov-file#PIE_dataset), [JAAD](https://github.com/ykotseruba/JAAD), [TITAN](https://usa.honda-ri.com/titan), [nuScenes](https://www.nuscenes.org/nuscenes), [BDD100k](https://doc.bdd100k.com/download.html))
+
+Extract the data in the following format:
+```
+[dataset_root]/
+  PIE_dataset/
+    annotations/
+    PIE_clips/
+    ...
+  JAAD/
+    annotations/
+    
+```
