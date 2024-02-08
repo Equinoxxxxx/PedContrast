@@ -2,7 +2,7 @@
 
 <img src="https://github.com/Equinoxxxxx/PedContrast/blob/master/fig1.png" width="500px">
 
-## Prepare the data
+## Prepare the datasets
 Download the datasets ([PIE](https://github.com/aras62/PIEPredict?tab=readme-ov-file#PIE_dataset), [JAAD](https://github.com/ykotseruba/JAAD), [TITAN](https://usa.honda-ri.com/titan), [nuScenes](https://www.nuscenes.org/nuscenes), [BDD100k](https://doc.bdd100k.com/download.html))  
 Note: for PIE and JAAD, the original data are in .mp4 format, use the scripts from the official repo ([PIE](https://github.com/aras62/PIEPredict?tab=readme-ov-file#PIE_dataset), [JAAD](https://github.com/ykotseruba/JAAD)) to extract the frames; for BDD100k, we only use the MOT 2020 subset that contains continous bounding boxes.  
 
@@ -36,6 +36,8 @@ Extract the data in the following format:
                 train/
                 ...
 ```
+## Get the weights for Grounded SAM and HRNet
+Download the 
 
 Get cropped images, skeletons and segmentation maps
 ```
