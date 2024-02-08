@@ -3,7 +3,7 @@
 <img src="https://github.com/Equinoxxxxx/PedContrast/blob/master/fig1.png" width="500px">
 
 ## Customize the directories
-Change the directory for datasets (```dataset_root```)
+Change the directories for datasets (```dataset_root```) and weight files (```ckpt_root```) in config.py.
 
 ## Prepare the datasets
 Download the datasets ([PIE](https://github.com/aras62/PIEPredict?tab=readme-ov-file#PIE_dataset), [JAAD](https://github.com/ykotseruba/JAAD), [TITAN](https://usa.honda-ri.com/titan), [nuScenes](https://www.nuscenes.org/nuscenes), [BDD100k](https://doc.bdd100k.com/download.html))  
