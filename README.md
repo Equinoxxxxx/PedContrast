@@ -34,5 +34,4 @@ Extract the data in the following format:
             labels/box_track_20/
                 train/
                 ...
-    
 ```
