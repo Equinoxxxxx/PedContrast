@@ -39,6 +39,7 @@ Extract the data in the following format:
 ## Get the weights for Grounded SAM and HRNet
 Download the 
 
+## Preprocess
 Get cropped images, skeletons and segmentation maps
 ```
 cd PedContrast
