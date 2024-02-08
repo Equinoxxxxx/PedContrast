@@ -42,7 +42,11 @@ Extract the data in the following format:
 ## Get the weights for Grounded SAM and HRNet
 Download the weight files
 ```
-[ckpt]
+[ckpt_root]/
+    c3d-pretrained.pth
+    groundingdino_swint_ogc.pth
+    pose_hrnet_w48_384x288.pth
+    sam_vit_h_4b8939.pth
 ```
 
 ## Preprocess
