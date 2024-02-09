@@ -59,3 +59,13 @@ Get cropped images, skeletons and segmentation maps
 cd PedContrast
 python -m tools.data.preprocess
 ```
+
+## Train
+```
+# PCPA
+python -m main --model_name PCPA --epochs 60 --batch_size 8 --p_epochs 100
+```
+```
+# Pedestrian Graph +
+python -m main --model_name ped_graph --epochs 30 --p_epochs 100
+```
