@@ -54,6 +54,7 @@ Download the weight files to ```ckpt_root```
 ```
 
 ## Preprocess
+Install [Grounded SAM](https://github.com/IDEA-Research/Grounded-Segment-Anything?tab=readme-ov-file#install-without-docker)
 Get cropped images, skeletons and segmentation maps
 ```
 cd PedContrast
