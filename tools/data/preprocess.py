@@ -107,4 +107,3 @@ if __name__ == '__main__':
     #             oids_all = oids_all.union(cls2oid[cls])
     #             num_obj += len(cls2oid[cls])
     # print(len(oids_all), num_obj)
-    prepare_data()
